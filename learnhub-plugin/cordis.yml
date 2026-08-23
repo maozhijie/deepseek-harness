@@ -1,0 +1,38 @@
+# learnhub 学习引擎插件：以 patch overlay 方式插入 Web profile。
+# 用法：pnpm dsh web --patch ./learnhub-plugin/cordis.yml
+#
+# 注意 1：Windows 下 loader 会把裸绝对路径 C:/... 当作 URL 协议（ERR_UNSUPPORTED_ESM_URL_SCHEME），
+# 必须写成 file:/// URL。
+# 注意 2：默认端口 3080 若已被其他 dsh 实例占用，这里钉到 3081 避开。
+# 注意 3：learnhub-ui 用裸包名——node 半经 profile node_modules 的 junction 解析，
+# 浏览器半由 client-modules 扫 dsh.client 声明后伺服 /plugins/learnhub-ui/client.js。
+# junction：~/.dsh/profiles/web/node_modules/learnhub-ui -> learnhub-plugin/ui
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3081
+
+# 「学习伙伴」preset 走 agent-presets 的用户根（~/.dsh/.agent-presets/），
+# 不走这里的 patch config：shipped profile 的 agent-presets 条目不接受 --patch
+# 的 roots 覆盖（实测 roster 不含该根）。用户根安装方式（一次性）：
+#   复制 preset/learnhub/user-root-composition.yml 到
+#   ~/.dsh/.agent-presets/learnhub/agent.cordis.yml（连同 preset.yml），
+#   该行 Include 指向仓库内真实 composition，改仓库文件即生效。
+#   注意必须真实目录：scanRoot 只认 isDirectory()，junction 报 symlink 被跳过。
+
+- insert:
+    - id: learnhub
+      name: 'file:///C:/Users/Administrator/Desktop/deepseek-harness/learnhub-plugin/src/learnhub.ts'
+      config:
+        # AI 生成/判卷用的模型路由（dsh llm seam，凭据走 credentials）
+        provider: deepseek-official
+        model: deepseek-v4-flash
+    # 侧边栏底栏「学习中心」按钮 + /learnhub iframe 弹层（纯 UI 包，node 半为空 apply）
+    - id: learnhub-ui
+      name: learnhub-ui
+    # 定时提醒（会话级工具 schedule_create/list/delete）+ 时区上下文。
+    # 三条学习任务（每日工作单/逾期巡检/周复盘）由 agent 在会话内 schedule_create 注册。
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'

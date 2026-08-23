@@ -1,0 +1,6 @@
+# 用户根占位 preset：真实 composition 在仓库内维护，这里只做 Include 引用，
+# 保持单一事实来源（改仓库文件即生效，无需同步拷贝）。
+# 安装方式：复制到 ~/.dsh/.agent-presets/learnhub/agent.cordis.yml
+- name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: file:///C:/Users/Administrator/Desktop/deepseek-harness/learnhub-plugin/preset/learnhub/agent.cordis.yml
