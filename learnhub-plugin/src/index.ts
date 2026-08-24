@@ -1,12 +1,16 @@
 /**
- * learnhub 学习引擎插件（Host 侧）。
+ * learnhub 学习引擎插件（Host 侧，bundle 形态）。
  *
  * 移植 Obsidian learnhub 插件的全部功能面到 dsh：
  * - agent 工具：status / today / settle / grade / exercises / check / rebuild /
  *   feedback / writeback / note_resolve + 图谱四面（analyze / propose / apply /
  *   exercises_gen）+ 通用 CLI 逃生口
- * - HTTP 路由 /learnhub/api/*：供 learnhub-ui 客户端面板调用
+ * - HTTP 路由 /learnhub/api/*：供客户端面板调用
  * - 运行日志：每次引擎调用追加 state/运行日志.md（07 §7 第 3 条）
+ *
+ * 跨机器部署：vault/中心路径不硬编码，由 cordis 行 config 提供
+ * （config.vault 必填；centerRel 缺省「学习中心」），机器差异写在
+ * profile 的 cordis.patch.yml，仓库内不含任何机器路径。
  *
  * 纪律：
  * - D14：一切引擎调用收口 runLearnhub（spawn python -X utf8 -m learnhub）。
@@ -16,23 +20,36 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-export const name = 'learnhub'
+export const name = 'dsh-learnhub'
 export const inject = ['tools', 'webServer', 'llm']
 
-/** AI 调用的 provider/model（cordis.yml config 可覆盖，apply 时写入）。 */
+/** apply 时的行 config：部署路径与 AI 路由，均可在 profile patch 覆盖。 */
+export interface LearnhubConfig {
+  /** vault 根目录绝对路径（必填，各机器不同）。 */
+  vault?: string
+  /** 学习中心相对 vault 的路径（缺省「学习中心」）。 */
+  centerRel?: string
+  /** AI 生成/判卷的 llm seam provider。 */
+  provider?: string
+  /** AI 生成/判卷的模型名。 */
+  model?: string
+}
+
+/** AI 调用的 provider/model（cordis 行 config 可覆盖，apply 时写入）。 */
 const llmCfg = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
 /** 进行中的课程生成任务（course/node 键，防重复触发）。 */
 const generating = new Set<string>()
 
-/** learnhub 引擎中心目录（vault 内 学习中心/）。 */
-const CENTER = 'C:/Users/Administrator/Desktop/obdb/学习中心'
-/** vault 根目录，用于解析 UI/agent 传入的笔记路径。 */
-const VAULT = 'C:/Users/Administrator/Desktop/obdb'
-/** 中心相对 vault 的路径（courseOfFile 首段反查用）。 */
-const CENTER_REL = '学习中心'
+/** learnhub 引擎中心目录（vault 内）；apply 时由 config 解析填充。 */
+let CENTER = ''
+/** vault 根目录，用于解析 UI/agent 传入的笔记路径；apply 时填充。 */
+let VAULT = ''
+/** 中心相对 vault 的路径（courseOfFile 首段反查用）；apply 时填充。 */
+let CENTER_REL = ''
 /** 单条运行日志输出截断上限（与 OB 插件同源）。 */
 const LOG_LIMIT = 1500
 /** 客户端面板的 HTTP 路由前缀。 */
@@ -537,8 +554,23 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
   }
 }
 
-export function apply(ctx: Context, config?: { provider?: string; model?: string }) {
-  // provider/model 来自 cordis.yml config（缺省用当前默认模型）
+export function apply(ctx: Context, config?: LearnhubConfig) {
+  // —— 部署路径（机器级 config，缺失/不存在直接失败，不做静默兜底）——
+  const vault = typeof config?.vault === 'string' ? config.vault.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+  if (!vault) {
+    throw new Error(
+      '[learnhub] config.vault 缺失：在该机器的 profile patch（~/.dsh/profiles/web/cordis.patch.yml）'
+      + '为 id: learnhub 行配置 vault（vault 根目录绝对路径）。')
+  }
+  if (!existsSync(vault)) throw new Error(`[learnhub] config.vault 目录不存在：${vault}`)
+  const centerRel = (config?.centerRel ?? '学习中心').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  const center = `${vault}/${centerRel}`
+  if (!existsSync(center)) throw new Error(`[learnhub] 学习中心目录不存在：${center}`)
+  VAULT = vault
+  CENTER_REL = centerRel
+  CENTER = center
+
+  // provider/model 来自行 config（缺省用当前默认模型）
   if (config?.provider) llmCfg.provider = config.provider
   if (config?.model) llmCfg.model = config.model
   // —— agent 工具面 ——
@@ -792,7 +824,7 @@ export function apply(ctx: Context, config?: { provider?: string; model?: string
     'learnhub: dashboard + practice page',
   )
 
-  console.log(`[learnhub] plugin loaded: 18 tools registered, page at ${PAGE}, API at ${API}/*`)
+  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${CENTER}, 18 tools registered, page at ${PAGE}, API at ${API}/*`)
 
   // 加载自检：不依赖模型直接跑一次 status --json，验证引擎通路。
   void runLearnhub(['learn', 'status', '--json'])
