@@ -31,9 +31,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-schedule": "*",
-    "@deepseek-ai/dsh-time-context": "*"
+    "@deepseek-ai/dsh-time-context": "*",
+    "@deepseek-ai/dsh-tools": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
@@ -51,5 +51,9 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
+  },
+  "dependencies": {
+    "ts-fsrs": "^5.4.2",
+    "yaml": "^2.9.0"
   }
 }

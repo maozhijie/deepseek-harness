@@ -130,6 +130,16 @@
   .opt-row { display: block; margin: 4px 0; cursor: pointer; }
   .opt-row input { margin-right: 8px; }
   textarea.answer { width: 100%; min-height: 96px; background: var(--panel); color: inherit; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; box-sizing: border-box; margin-bottom: 8px; }
+  /* —— 课程工作区（树形）—— */
+  .tree-region { font-weight: 600; padding: 6px 8px; margin-top: 8px; border-left: 3px solid #888; background: var(--panel); border-radius: 4px; }
+  .tree-block { color: var(--muted, #888); margin: 6px 8px 2px; font-size: 13px; }
+  .tree-node { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 20px; }
+  .tree-node .sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+  .tree-node .meta { color: var(--muted, #888); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-node button { padding: 1px 10px; font-size: 12px; }
+  .bank-q { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .bank-q .kind { display: inline-block; font-size: 11px; color: var(--muted, #888); border: 1px solid var(--border); border-radius: 8px; padding: 0 7px; margin-right: 6px; }
+  .bank-q .result { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
   /* —— 推荐事件卡片（动态队列，仪表盘/学习入口/评分后共用） —— */
   .event-card { display: flex; gap: 12px; align-items: flex-start; }
   .event-card .ev-main { flex: 1; min-width: 0; }
@@ -148,6 +158,7 @@
     <button id="tab-dashboard" class="active">仪表盘</button>
     <button id="tab-study">学习</button>
     <button id="tab-practice">练习面板</button>
+    <button id="tab-tree">课程</button>
     <button id="tab-generate">生成</button>
     <button id="tab-graph">知识图谱</button>
     <button id="tab-stats">统计</button>
@@ -274,36 +285,53 @@ const state = {
   items: [],
   results: new Map(), // ex → 是否正确（human 自评同样计入）
   autoWritePending: false, // 全部作答后自动写回的一次性闸门
+  bankNode: '', // 工作区当前展开题库的节点
+  bankCourse: '', // 工作区当前题库的课程
 };
 
 function switchTab(tab, opts) {
   state.tab = tab;
   if (opts && opts.course) state.course = opts.course;
   if (opts && opts.node) { state.node = opts.node; state.skipPicker = true; }
-  for (const t of ['dashboard', 'study', 'practice', 'generate', 'graph', 'stats', 'proposals']) {
+  for (const t of ['dashboard', 'study', 'practice', 'tree', 'generate', 'graph', 'stats', 'proposals']) {
     document.getElementById('tab-' + t).className = tab === t ? 'active' : '';
   }
-  appEl.className = tab === 'graph' ? 'wide' : '';
+  appEl.className = (tab === 'graph' || tab === 'tree') ? 'wide' : '';
   render();
 }
 document.getElementById('tab-dashboard').addEventListener('click', () => switchTab('dashboard'));
 document.getElementById('tab-study').addEventListener('click', () => switchTab('study'));
 document.getElementById('tab-practice').addEventListener('click', () => switchTab('practice'));
+document.getElementById('tab-tree').addEventListener('click', () => switchTab('tree'));
 document.getElementById('tab-generate').addEventListener('click', () => switchTab('generate'));
 document.getElementById('tab-graph').addEventListener('click', () => switchTab('graph'));
 document.getElementById('tab-stats').addEventListener('click', () => switchTab('stats'));
 document.getElementById('tab-proposals').addEventListener('click', () => switchTab('proposals'));
 
+/** 渲染互斥：异步渲染期间的新请求折叠为一次重渲染，防止两个 render 交错向 appEl 重复追加。 */
+let rendering = false;
+let rerenderQueued = false;
+
 async function render() {
-  if (cyInstance) { cyInstance.destroy(); cyInstance = null; }
-  appEl.textContent = '';
-  if (state.tab === 'dashboard') await renderDashboard();
-  else if (state.tab === 'study') await renderStudy();
-  else if (state.tab === 'practice') await renderPractice();
-  else if (state.tab === 'generate') await renderGeneration();
-  else if (state.tab === 'graph') await renderGraph();
-  else if (state.tab === 'stats') await renderStats();
-  else await renderProposals();
+  if (rendering) { rerenderQueued = true; return; }
+  rendering = true;
+  try {
+    do {
+      rerenderQueued = false;
+      if (cyInstance) { cyInstance.destroy(); cyInstance = null; }
+      appEl.textContent = '';
+      if (state.tab === 'dashboard') await renderDashboard();
+      else if (state.tab === 'study') await renderStudy();
+      else if (state.tab === 'practice') await renderPractice();
+      else if (state.tab === 'tree') await renderWorkspace();
+      else if (state.tab === 'generate') await renderGeneration();
+      else if (state.tab === 'graph') await renderGraph();
+      else if (state.tab === 'stats') await renderStats();
+      else await renderProposals();
+    } while (rerenderQueued);
+  } finally {
+    rendering = false;
+  }
 }
 
 /* ============ 推荐事件卡片（动态队列：仪表盘/学习入口/评分后共用） ============ */
@@ -328,6 +356,158 @@ function renderEventCards(parent, events, emptyText) {
     card.appendChild(main);
     actionButton(card, EV_BTN[e.type] || '开始', () => switchTab('study', { course: e.course, node: e.node }), true);
     parent.appendChild(card);
+  }
+}
+
+/* ============ 课程工作区（树形：区/块/节点 + 题库作答） ============ */
+const BANK_KIND_LABEL = { single_choice: '单选', true_false: '判断', fill_in_blank: '填空', reflection: '开放' };
+
+async function renderWorkspace() {
+  appEl.appendChild(el('h3', '', '课程工作区'));
+  let doc;
+  try { doc = await api('/courses/tree'); } catch (err) {
+    appEl.appendChild(el('pre', '', err.message));
+    return;
+  }
+  for (const c of doc.courses) {
+    const cwrap = el('div', 'card');
+    cwrap.appendChild(el('h4', '', `${c.name}（${c.id || '-'}）`));
+    for (const r of c.regions) {
+      const rhead = el('div', 'tree-region');
+      rhead.textContent = r.name;
+      rhead.style.borderLeftColor = r.color || '#888';
+      cwrap.appendChild(rhead);
+      for (const b of r.blocks) {
+        cwrap.appendChild(el('div', 'tree-block', '· ' + b.name));
+        for (const n of b.nodes) {
+          const row = el('div', 'tree-node');
+          const dot = el('span', 'sw');
+          dot.style.background = STAGE_COLOR[n.stage] || '#999';
+          row.appendChild(dot);
+          row.appendChild(el('strong', '', n.node + (n.opt ? '（可选）' : '')));
+          const statusTxt = n.contentVersion === 0 ? '未生成'
+            : `v${n.contentVersion}${n.contentStatus === 'draft' ? '（草稿）' : n.contentStatus === 'flagged' ? '（待重生成）' : ''}`;
+          row.appendChild(el('span', 'meta',
+            `${n.stage} ｜ 掌握 ${Math.round((n.mastery || 0) * 100)}% ｜ ${statusTxt}${n.hasBank ? ' ｜ 有题库' : ''}`));
+          const learnBtn = el('button', '', '学习');
+          learnBtn.addEventListener('click', () => switchTab('study', { course: c.name, node: n.node }));
+          row.appendChild(learnBtn);
+          const bankBtn = el('button', '', '题库');
+          bankBtn.addEventListener('click', () => { state.bankCourse = c.name; state.bankNode = n.node; render(); });
+          row.appendChild(bankBtn);
+          cwrap.appendChild(row);
+        }
+      }
+    }
+    appEl.appendChild(cwrap);
+  }
+  if (state.bankNode) await renderBankSection();
+}
+
+async function renderBankSection() {
+  const wrap = el('div', 'card');
+  const head = el('h4');
+  head.textContent = `题库 · ${state.bankCourse} / ${state.bankNode}`;
+  const close = el('button', '', '收起');
+  close.addEventListener('click', () => { state.bankNode = ''; state.bankCourse = ''; render(); });
+  head.appendChild(close);
+  wrap.appendChild(head);
+  wrap.appendChild(el('div', 'hint',
+    '作答即自动判卷并计入练习证据（错题公布答案/解析）；调度评分仍走学习流的自评 1-4。建题库让 agent 调 learnhub_question_save。'));
+  appEl.appendChild(wrap);
+  let doc;
+  try { doc = await api(`/questions?course=${encodeURIComponent(state.bankCourse)}&node=${encodeURIComponent(state.bankNode)}`); } catch (err) {
+    wrap.appendChild(el('pre', '', err.message));
+    return;
+  }
+  if (!doc.questions || !doc.questions.length) {
+    wrap.appendChild(el('div', 'hint', '该节点还没有题库（可让 agent 用 learnhub_question_save 生成）。'));
+    return;
+  }
+  for (const q of doc.questions) {
+    const box = el('div', 'bank-q');
+    const head1 = el('div');
+    head1.appendChild(el('span', 'kind', BANK_KIND_LABEL[q.kind] || q.kind));
+    head1.appendChild(el('span', 'kind', `难度 ${q.difficulty}`));
+    head1.appendChild(el('strong', '', `${q.no}. ${q.q}`));
+    box.appendChild(head1);
+    const inputWrap = el('div');
+    let collect = () => null;
+    if (q.kind === 'single_choice' && q.options) {
+      for (const opt of q.options) {
+        const lab = el('label', 'opt-row');
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = `bank-${q.id}`;
+        radio.value = opt.charAt(0).toUpperCase();
+        lab.appendChild(radio);
+        lab.appendChild(document.createTextNode(' ' + opt));
+        inputWrap.appendChild(lab);
+      }
+      collect = () => {
+        const sel = inputWrap.querySelector('input:checked');
+        return sel ? sel.value : null;
+      };
+    } else if (q.kind === 'true_false') {
+      collect = () => {
+        const sel = inputWrap.querySelector('input:checked');
+        return sel ? sel.value : null;
+      };
+      for (const [val, label] of [['true', '对'], ['false', '错']]) {
+        const lab = el('label', 'opt-row');
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = `bank-${q.id}`;
+        radio.value = val;
+        lab.appendChild(radio);
+        lab.appendChild(document.createTextNode(' ' + label));
+        inputWrap.appendChild(lab);
+      }
+    } else if (q.kind === 'fill_in_blank') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = '填入答案';
+      input.style.cssText = 'width: 60%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: inherit;';
+      inputWrap.appendChild(input);
+      collect = () => input.value;
+    } else {
+      const ta = document.createElement('textarea');
+      ta.className = 'answer';
+      ta.placeholder = '写下你的回答（AI 按评分要点判卷）';
+      inputWrap.appendChild(ta);
+      collect = () => ta.value;
+    }
+    box.appendChild(inputWrap);
+    const result = el('div', 'result');
+    result.style.display = 'none';
+    box.appendChild(result);
+    const submit = el('button', 'primary', '提交作答');
+    submit.addEventListener('click', async () => {
+      const answer = collect();
+      if (answer === null || answer === '' ) { toast('先作答再提交', true); return; }
+      submit.disabled = true;
+      try {
+        const r = await api('/question-answer', {
+          course: state.bankCourse, node: state.bankNode, qid: q.id, answer,
+        });
+        result.style.display = '';
+        result.textContent = '';
+        const verdict = el('div', '', `${r.correct ? '✓ 正确' : '✗ 不对'}${r.kind === 'reflection' ? `（${r.score} 分）` : ''}`);
+        verdict.style.color = r.correct ? 'var(--good, #2e7d32)' : 'var(--warn, #b71c1c)';
+        result.appendChild(verdict);
+        if (r.explanation) result.appendChild(el('div', 'hint', '解析：' + r.explanation));
+        if (!r.correct && r.answer !== undefined) result.appendChild(el('div', 'hint', '答案/要点：' + r.answer));
+        // 引擎把解析并入 feedback 时避免同文重复展示
+        if (r.feedback && r.feedback !== r.explanation) result.appendChild(el('div', 'hint', r.feedback));
+        submit.textContent = '重新提交';
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    box.appendChild(submit);
+    wrap.appendChild(box);
   }
 }
 

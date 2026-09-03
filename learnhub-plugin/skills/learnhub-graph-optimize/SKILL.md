@@ -5,7 +5,7 @@ description: 优化 learnhub 既有课程知识图谱（改名/调前置/增删�
 
 # learnhub 图谱优化
 
-对既有课程做结构化变更。铁律同生成：只产 YAML，过门禁，apply 才入库；rename/del_node 的联动（课程笔记、pre/enc 引用、db 行改名）由 apply 自动完成，绝不手工改文件。
+对既有课程做结构化变更。铁律同生成：只产 YAML，过门禁，apply 才入库；rename/del_node 的联动（笔记文件改名、pre/enc 引用、题库文件随迁）由 apply 自动完成，绝不手工改文件。
 
 ## 工作流
 

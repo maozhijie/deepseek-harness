@@ -7,7 +7,7 @@ description: learnhub 复盘与定时任务：周复盘学习历史、巡检逾�
 
 ## 复盘流程
 
-1. **取数**：`learnhub_status` 看各课程进度与状态分布；`learnhub_graph_analyze` 看遗忘热点、瓶颈、不可达节点；用 `learnhub` 工具跑 `learn history`（若有）或查 journal 了解近期学习节奏。
+1. **取数**：`learnhub_status` 看各课程进度与状态分布；`learnhub_graph_analyze` 看遗忘热点、瓶颈、不可达节点；读 `state/journal.jsonl`（调度流水）与 `state/practice.jsonl`（作答流水）了解近期学习节奏。
 2. **结论**：哪些节点反复评 1-2（需重讲或拆细）、哪些长期未复习（逾期）、图谱结构是否失衡。
 3. **行动**：
    - 结构问题 → 按 learnhub-graph-optimize 提 edit 提案；

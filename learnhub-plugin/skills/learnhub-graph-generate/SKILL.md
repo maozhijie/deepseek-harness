@@ -5,11 +5,11 @@ description: 为 learnhub 学习系统生成新课程知识图谱（区/块/节�
 
 # learnhub 图谱生成
 
-生成一门新课程的知识图谱。铁律：LLM 只产出 YAML 文本，一切入库必须过门禁（schema + 结构检查 + audit），绝不直接写课程文件或数据库。
+生成一门新课程的知识图谱。铁律：LLM 只产出 YAML 文本，一切入库必须过门禁（schema + 结构检查 + audit），绝不直接写课程文件。
 
 ## 工作流
 
-1. **摸底**：调用 `learnhub_graph_analyze`（可加 `course` 参数）了解既有课程与可参考的结构粒度。多课程注册时用 `learnhub` 工具跑 `course list`。
+1. **摸底**：调用 `learnhub_graph_analyze`（可加 `course` 参数）了解既有课程与可参考的结构粒度。多课程注册时看 `learnhub_status` 的课程清单。
 2. **产出 YAML**：按 GenProposal schema 写完整课程声明：
 
 ```yaml
