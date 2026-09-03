@@ -6,7 +6,8 @@
  * esbuild JS API，与 dsh-worktable 构建同构。
  */
 import { build } from 'esbuild'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -73,8 +74,26 @@ await build({
   footer: clientFooter,
 })
 
+/** 技能随构建安装：skills/* 真实复制到 <dshHome>/skills/（skill-filesystem 的
+ * 内置扫描根，对所有 dsh 会话可见、无需任何配置）。必须真实目录而非
+ * junction——skill 扫描根只认 isDirectory()。改技能后重跑 build 即生效。 */
+function syncSkills() {
+  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const dest = join(dshHome, 'skills')
+  mkdirSync(dest, { recursive: true })
+  let n = 0
+  for (const entry of readdirSync(join(here, 'skills'), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    rmSync(join(dest, entry.name), { recursive: true, force: true })
+    cpSync(join(here, 'skills', entry.name), join(dest, entry.name), { recursive: true })
+    n++
+  }
+  console.log(`[dsh-learnhub build] skills synced: ${n} -> ${dest}`)
+}
+
 for (const f of ['lib/index.js', 'lib/engine.js', 'lib/client.js']) {
   stripBlankLineTrailingWhitespace(join(here, f))
 }
+syncSkills()
 
 console.log('[dsh-learnhub build] done: lib/index.js, lib/client.js')

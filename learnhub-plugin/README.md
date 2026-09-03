@@ -72,10 +72,13 @@ bundle 已注册进 profile 的 `dsh.profile.bundles`；`time-context` 与 `sche
 ```sh
 cd learnhub-plugin
 npm install
-npm run build     # lib/index.js + lib/client.js + lib/engine.js
+npm run build     # lib/index.js + lib/client.js + lib/engine.js + 技能同步
 npm run check
 ```
 
+`npm run build` 同时把 `skills/*` 真实复制到 `<dshHome>/skills/`
+（skill-filesystem 的内置扫描根，`DSH_HOME` 环境变量可覆盖 home），
+技能随构建安装、对所有 dsh 会话可见；改技能后重跑 build 即生效。
 `lib/` 产物已纳入 git 管理（根 `.gitignore` 的 `!learnhub-plugin/lib/` 例外），
 克隆即可用；修改 `src/` 后重新 build 并提交产物。
 

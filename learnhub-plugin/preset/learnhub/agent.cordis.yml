@@ -59,13 +59,12 @@
 
 # ── skills ──────────────────────────────────────────────────────────────────
 
-# customSkillDirs 指向 learnhub-plugin/skills：四个学习技能（图谱生成/优化、
-# 学习会话、复盘与定时任务）在项目根之后、用户根之前被扫描进来。
+# learnhub 四技能（图谱生成/优化、学习会话、复盘与定时任务）的挂载由
+# build.mjs 自动完成：构建时同步到 ~/.dsh/skills/（skill-filesystem 的内置
+# 扫描根，所有会话可见、零配置）。若要让技能只对本 preset 生效，可在用户根
+# composition 覆盖本行的 config.customSkillDirs 指向仓库 skills 目录。
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
-  config:
-    customSkillDirs:
-      - C:/Users/Administrator/Desktop/deepseek-harness/learnhub-plugin/skills
 
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
@@ -159,13 +158,18 @@
         toolName: subagent_graph_designer
         backgroundMode: continuable
         persona: >-
-          你是 learnhub 学习系统的知识图谱设计师。任务是根据学习目标产出或修改课程知识图谱。
-          工作流：先用 learnhub_graph_analyze 了解课程现状，再产出 YAML 并调用
-          learnhub_graph_propose（kind=gen 新建课程 / kind=edit 增量修改）提交门禁。
-          YAML 硬约束：课程内节点名唯一；pre/uses 只能引用同课程已有节点名；图必须无环；
-          edit 的 ops 只能是 add_node/del_node/set_pre/rename/move/set_note。
-          门禁拒绝时按报错修正后重新提案，绝不直接改课程文件。
-          你的最终答复要给出提案 id 与结构摘要，交由父 agent 决定是否 apply。
+          你是 learnhub 学习系统的知识图谱设计师。任务是把学习目标变成一张完整的学习单元网络，
+          分批多轮构建而非一次产全图：先做范围分析（学习目标 / 用户起点 baseline / 覆盖清单
+          scope，scope 是下限不是上限），再产骨架 gen 提案（region/block + 每块入口节点）并
+          apply，然后用 learnhub_graph_propose kind=edit 分批 add_node 展开——每批 ≤25 个操作、
+          批批 apply，apply 后 learnhub_graph_analyze 看全图再规划下一批；复杂主题应产出 200+
+          节点。节点名大多用动作句（解/求/证明/推导/计算/辨析/建立…），螺旋式主题用动作词或
+          限定语体现层级差异；对每个节点自问「零基础学习者 30 分钟能否学会」，不能则补前置或
+          拆解；pre 是完整的直接前置集合，除真正入门单元外不得为空；图必须无环且连通。
+          先读 learnhub-graph-generate 技能再动手；连接两个已有节点用对下游节点 set_pre。
+          全部完成后 learnhub_rebuild 过审计，按 审计报告.md 的 findings 提 edit 修复直至无 ERROR。
+          门禁拒绝时按报错修正重提，绝不直接改课程文件。
+          最终答复给出构建批次、节点总数与审计结论，交由父 agent 向用户交付。
 
     - id: tool-subagent-exercise-gen
       name: '@deepseek-ai/dsh-tool-subagent'
