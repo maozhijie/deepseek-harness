@@ -10745,6 +10745,33 @@ var Content = class _Content {
 \`\`\`json
 {"score": 0-1\u5C0F\u6570, "verdict": "\u5BF9|\u534A\u5BF9|\u9519", "feedback": "\u9488\u5BF9\u4F5C\u7B54\u7684\u5177\u4F53\u70B9\u8BC4", "suggestions": "\u4E0B\u4E00\u6B65\u600E\u4E48\u6539\u8FDB"}
 \`\`\`
+`,
+    \u9898\u76EE\u751F\u6210: `# \u9898\u76EE\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u8282\u70B9\u6B63\u6587\u7531\u7CFB\u7EDF\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u51FA\u9898\u8001\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u8282\u70B9\u6B63\u6587\u51FA\u4E00\u7EC4\u7EC3\u4E60\u9898\uFF0C\u8986\u76D6\u6B63\u6587\u7684\u6838\u5FC3\u6982\u5FF5\u3001\u6613\u9519\u70B9\u4E0E\u5178\u578B\u5E94\u7528\u3002
+
+## \u786C\u7EA6\u675F
+
+1. \u9898\u578B\u5FC5\u987B\u591A\u6837\uFF1A\u5355\u9009\uFF08single_choice\uFF09\u3001\u591A\u9009\uFF08multi_choice\uFF09\u3001\u5224\u65AD\uFF08true_false\uFF09\u3001\u586B\u7A7A\uFF08fill_in_blank\uFF09\u81F3\u5C11\u51FA\u73B0\u4E09\u79CD\uFF0C\u4E0D\u8981\u5168\u51FA\u540C\u4E00\u9898\u578B\u3002
+2. \u96BE\u5EA6\u9012\u8FDB\uFF1A\u5F00\u5934 1-2 \u9053\u6982\u5FF5\u8FA8\u6790\uFF08difficulty: 1\uFF09\uFF0C\u4E2D\u95F4\u5E94\u7528\u4E0E\u8BA1\u7B97\uFF08difficulty: 2\uFF09\uFF0C\u6536\u5C3E 1-2 \u9053\u7EFC\u5408\u6216\u6613\u9519\u9677\u9631\uFF08difficulty: 3\uFF09\u3002
+3. \u6BCF\u9898\u5FC5\u987B\u7ED9\u5168\uFF1A\u9898\u5E72\u3001\u7B54\u6848\u3001\u89E3\u6790\uFF08\u8BF4\u660E\u4E3A\u4EC0\u4E48\u5BF9\u3001\u9519\u8BEF\u9009\u9879\u9519\u5728\u54EA\uFF09\u3002
+4. \u53EA\u8003\u6B63\u6587\u91CC\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u4E0D\u5F97\u5F15\u5165\u6B63\u6587\u6CA1\u6709\u7684\u6982\u5FF5\u3001\u8BB0\u53F7\u6216\u7ED3\u8BBA\u3002
+5. \u9009\u62E9\u9898 options \u4E0D\u5E26 A./B. \u7F16\u53F7\u524D\u7F00\uFF08\u7CFB\u7EDF\u81EA\u52A8\u7F16\u53F7\uFF09\uFF1B\u586B\u7A7A\u9898 answer \u7528\u6570\u7EC4\u5217\u51FA\u6240\u6709\u53EF\u63A5\u53D7\u5199\u6CD5\u3002
+
+## \u8F93\u51FA
+
+\u53EA\u8F93\u51FA\u4E00\u4E2A YAML \u6587\u6863\uFF08\u4E0D\u8981\u4EE3\u7801\u56F4\u680F\u3001\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\uFF09\uFF0C\u7ED3\u6784\u5982\u4E0B\uFF1A
+
+node: <\u8282\u70B9\u540D>
+questions:
+  - id: q1
+    kind: single_choice
+    q: \u9898\u5E72
+    options: ["\u9009\u9879\u4E00", "\u9009\u9879\u4E8C", "\u9009\u9879\u4E09", "\u9009\u9879\u56DB"]
+    answer: A
+    explanation: \u89E3\u6790
+    difficulty: 1
+    uses: [\u7528\u5230\u7684\u524D\u7F6E\u6982\u5FF5]
 `
   };
   /** 读提示词模板；不存在时写入内置默认。 */
@@ -11730,6 +11757,9 @@ ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
   }
 };
 
+// src/engine/index.ts
+init_yaml();
+
 // src/engine/sessions.ts
 init_dates();
 import { readFile as readFile9, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
@@ -12532,7 +12562,7 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
       graph,
       node,
       normalized.body,
-      async (n) => (await this.loadView(c)).state[n],
+      (n) => state[n],
       (rec) => this.store.appendJournal({ ...rec, course: c.name })
     );
     await this.content.queueDone(c.root, node);
@@ -12876,6 +12906,44 @@ ${String(q.answer)}`,
     await this.bank.archiveQuestion(this.paths.courseRoot(c.root), node, qid, archived);
     return { course: c.name, node, qid, archived };
   }
+  /** AI 出题：节点正文 → 出题提示词 + llm → 产出的题库 YAML 逐题过 validateBank 门禁追加落盘。
+   * llm 由 host 注入（返回已剥围栏的纯文本）。骨架节点（无正文）直接报错。 */
+  async questionGenerate(courseKey, node, count, llm) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[quiz] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    const [, regionName] = graph.blockOf[node];
+    const note = await loadNote(this.paths.courseNotePath(c.root, regionName, node));
+    const body = note.body.replace(/^>\s*内容待生成。\s*$/m, "").trim();
+    if (!body) throw new Error(`[quiz] \u300C${node}\u300D\u8FD8\u6CA1\u6709\u6B63\u6587\u2014\u2014\u5148\u300C\u751F\u6210\u6B63\u6587\u300D\u518D\u51FA\u9898\u3002`);
+    const tpl = await this.loadPrompt("\u9898\u76EE\u751F\u6210");
+    const raw = await llm(`${tpl}
+
+## \u9898\u76EE\u6570\u91CF
+
+${count} \u9053
+
+---
+
+${body}`);
+    const doc = YAML.parse(raw);
+    if (typeof doc !== "object" || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
+      throw new Error("[quiz] \u6A21\u578B\u6CA1\u6709\u4EA7\u51FA\u53EF\u7528\u9898\u76EE\uFF08questions \u4E3A\u7A7A\uFF09\u3002");
+    }
+    const parsedNode = typeof doc.node === "string" ? doc.node.trim() : "";
+    if (parsedNode && parsedNode !== node) {
+      throw new Error(`[quiz] \u9898\u5E93 node \u4E0D\u5339\u914D\uFF1A\u671F\u671B\u300C${node}\u300D\uFF0C\u6A21\u578B\u7ED9\u4E86\u300C${parsedNode}\u300D\u3002`);
+    }
+    let added = 0;
+    for (const raw2 of doc.questions.slice(0, Math.max(1, count))) {
+      const q = { ...raw2 };
+      delete q.id;
+      await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q);
+      added++;
+    }
+    const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+    return { course: c.name, node, added, total: bank.questions.length };
+  }
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
   async courseDelete(courseKey) {
     const c = await this.registry.get(courseKey);
@@ -13028,7 +13096,10 @@ async function llmComplete(ctx, prompt, system) {
   for await (const chunk of stream) {
     if (chunk.type === "text-delta") text += chunk.text;
     if (chunk.type === "finish" && (chunk.reason.kind === "aborted" || chunk.reason.kind === "error")) {
-      throw new Error(chunk.reason.kind === "aborted" ? "\u6A21\u578B\u8C03\u7528\u88AB\u53D6\u6D88" : `\u6A21\u578B\u8C03\u7528\u5931\u8D25\uFF1A${String(chunk.reason.failure.message)}`);
+      if (chunk.reason.kind === "aborted") throw new Error("\u6A21\u578B\u8C03\u7528\u88AB\u53D6\u6D88");
+      const f = chunk.reason.failure;
+      const status = f.status ? `/${f.status}` : "";
+      throw new Error(`\u6A21\u578B\u8C03\u7528\u5931\u8D25[${f.code}${status}]\uFF1A${String(f.message)}`);
     }
     if (chunk.type === "finish" && chunk.reason.kind === "max-tokens") truncated = true;
   }
@@ -13040,13 +13111,16 @@ function stripFences(body) {
   const m = body.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/);
   return m ? m[1] : body;
 }
+async function generateQuiz(ctx, course, node, count) {
+  return engine.questionGenerate(course, node, count, async (prompt) => stripFences(await llmComplete(ctx, prompt)));
+}
 async function generateContent(ctx, course, node) {
   const key = `${course}/${node}`;
   const existing = genJobs.get(key);
   if (existing && (existing.status === "running" || existing.status === "cancelling")) {
     throw new Error(`\u300C${node}\u300D\u6B63\u5728\u751F\u6210\u4E2D\uFF0C\u8BF7\u7A0D\u5019\u3002`);
   }
-  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running" };
+  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running", phase: "content" };
   genJobs.set(key, job);
   try {
     const pack = await engine.contentPack(course, node);
@@ -13058,18 +13132,27 @@ async function generateContent(ctx, course, node) {
 ${pack}`));
     if (job.status === "cancelling") throw new Error("\u751F\u6210\u5DF2\u53D6\u6D88\uFF0C\u7ED3\u679C\u5DF2\u4E22\u5F03\u3002");
     const res = await engine.contentApply(course, node, body);
-    job.status = "done";
-    job.message = res.message;
-    return res.message;
+    job.phase = "quiz";
+    job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u4E2D\u2026`;
+    try {
+      const quiz = await generateQuiz(ctx, course, node, 6);
+      job.status = "done";
+      job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898 ${quiz.added} \u9053\uFF08\u9898\u5E93\u5171 ${quiz.total}\uFF09`;
+    } catch (quizErr) {
+      job.status = "done";
+      job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u5931\u8D25\uFF08${quizErr instanceof Error ? quizErr.message : String(quizErr)}\uFF09\u2014\u2014\u53EF\u5728\u7EC3\u4E60\u9875\u5355\u72EC\u91CD\u8BD5`;
+    }
+    return job.message;
   } catch (err) {
     job.status = job.status === "cancelling" ? "cancelled" : "failed";
     job.message = err instanceof Error ? err.message : String(err);
     throw err;
   } finally {
+    const keep = job.status === "failed" || job.status === "cancelled" ? 24 * 60 * 6e4 : 30 * 6e4;
     setTimeout(() => {
-      const j = genJobs.get(key);
-      if (j && j.status !== "running" && j.status !== "cancelling") genJobs.delete(key);
-    }, 5 * 6e4).unref();
+      const cur = genJobs.get(key);
+      if (cur && cur.status !== "running" && cur.status !== "cancelling") genJobs.delete(key);
+    }, keep).unref();
   }
 }
 function generationStatus() {
@@ -13286,19 +13369,22 @@ async function handleApi(ctx, req, res) {
         return;
       }
       if (route === "/generate") {
-        sendJson(res, 200, {
-          message: await generateContent(ctx, need(body, "course"), need(body, "node"))
-        });
+        sendJson(res, 200, await apiRun("api/generate", () => generateContent(ctx, need(body, "course"), need(body, "node"))));
+        return;
+      }
+      if (route === "/question-generate") {
+        const count = Number(body.count);
+        sendJson(res, 200, await apiRun("api/question-generate", () => generateQuiz(ctx, need(body, "course"), need(body, "node"), Number.isInteger(count) && count > 0 ? count : 6)));
         return;
       }
       if (route === "/ai-grade") {
-        sendJson(res, 200, await aiGrade(
+        sendJson(res, 200, await apiRun("api/ai-grade", () => aiGrade(
           ctx,
           need(body, "course"),
           need(body, "node"),
           needEx(body, "ex"),
           typeof body.answer === "string" ? body.answer : ""
-        ));
+        )));
         return;
       }
       if (route === "/review") {
@@ -13310,13 +13396,13 @@ async function handleApi(ctx, req, res) {
         return;
       }
       if (route === "/question-answer") {
-        sendJson(res, 200, await engine.questionAnswer(
+        sendJson(res, 200, await apiRun("api/question-answer", () => engine.questionAnswer(
           (prompt) => llmComplete(ctx, prompt),
           need(body, "course"),
           need(body, "node"),
           need(body, "qid"),
           typeof body.answer === "string" ? body.answer : ""
-        ));
+        )));
         return;
       }
       if (route === "/question-add") {
