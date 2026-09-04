@@ -62,6 +62,17 @@ export default function App() {
 
   useEffect(() => { void reload() }, [reload])
 
+  // 夜间模式：arco-theme 切换（跟随系统默认，手动选择存 localStorage）
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('learnhub-theme')
+    if (saved === 'dark' || saved === 'light') return saved
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
+  useEffect(() => {
+    document.body.setAttribute('arco-theme', theme)
+    localStorage.setItem('learnhub-theme', theme)
+  }, [theme])
+
   if (loading && !status) {
     return <div className='app-shell'><div style={{ margin: 'auto' }}><Spin dot /></div></div>
   }
@@ -88,15 +99,22 @@ export default function App() {
 
   return (
     <div className='app-shell'>
-      <Tabs activeTab={tab} onChange={k => setTab(k as TabKey)} type='capsule' size='small'
-        style={{ padding: '8px 12px 0', borderBottom: '1px solid var(--color-border-2,#e5e6eb)' }}>
-        <Tabs.TabPane key='learn' title='学习' />
-        <Tabs.TabPane key='graph' title='学习图' />
-        <Tabs.TabPane key='bank' title='题目管理' />
-        <Tabs.TabPane key='stats' title='统计' />
-        <Tabs.TabPane key='generate' title='生成' />
-        <Tabs.TabPane key='proposals' title='提案' />
-      </Tabs>
+      <div style={{ display: 'flex', alignItems: 'flex-start', borderBottom: '1px solid var(--color-border-2,#e5e6eb)' }}>
+        <Tabs activeTab={tab} onChange={k => setTab(k as TabKey)} type='capsule' size='small'
+          style={{ flex: 1, padding: '8px 12px 0' }}>
+          <Tabs.TabPane key='learn' title='学习' />
+          <Tabs.TabPane key='graph' title='学习图' />
+          <Tabs.TabPane key='bank' title='题目管理' />
+          <Tabs.TabPane key='stats' title='统计' />
+          <Tabs.TabPane key='generate' title='生成' />
+          <Tabs.TabPane key='proposals' title='提案' />
+        </Tabs>
+        <Button size='mini' type='text' style={{ margin: '10px 12px 0 0', flexShrink: 0 }}
+          onClick={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))}
+          title={theme === 'dark' ? '切到亮色' : '切到暗色'}>
+          {theme === 'dark' ? '☀ 亮色' : '☾ 暗色'}
+        </Button>
+      </div>
       <div className={`app-body${tab === 'graph' ? ' no-pad' : ''}`}>
         {tab !== 'learn' && noCourse ? (
           <div style={{ paddingTop: 60, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>

@@ -71,10 +71,11 @@ export default function GraphPage({ frame }: { frame: AppFrame }) {
     }
     const locked = new Set<string>()
     for (const n of g.nodes) {
+      if (n.data.stage === 'skipped') continue // 已跳过 = 视同已通过，不锁
       const upsOf = ups.get(n.data.id) ?? []
       if (upsOf.some(id => {
         const s = stageOf.get(id) ?? 'unseen'
-        return s !== 'review' && s !== 'mastered'
+        return s !== 'review' && s !== 'mastered' && s !== 'skipped'
       })) locked.add(n.data.id)
     }
     return locked

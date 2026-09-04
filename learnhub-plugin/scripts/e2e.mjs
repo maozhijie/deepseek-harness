@@ -1,13 +1,18 @@
 /**
  * 端到端写路径测试：把 学习中心 的最小子集复制到临时目录，在副本上跑
- * 题库保存/作答/工作单生成/评分/结算/审计/doctor/面板扩展接口 全链路，绝不触碰真实 vault。
- * 种子课程动态探测（注册表第一门启用课），课程名不硬编码。
+ * 题库保存/刷卡作答（题目级 FSRS）/跳过/完成/审计/doctor/面板扩展接口 全链路，
+ * 绝不触碰真实 vault。种子课程动态探测（注册表第一门启用课），课程名不硬编码。
  * 用法：node scripts/e2e.mjs <vault 路径>
  */
 import { mkdirSync, cpSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
 import { LearnhubEngine } from '../lib/engine.js'
+
+const todayStr = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 const vault = process.argv[2]
 if (!vault) {
@@ -117,41 +122,29 @@ async function run() {
     assert(r.questions.length === 2 && r.questions[0].id === 'q1', 'bank list mismatch')
     assert(!('answer' in r.questions[0]), 'answers must not leak in list')
   })
-  await step('questionAnswer 正确(single_choice)', async () => {
+  await step('questionAnswer 正确(single_choice) → 题目 FSRS 推进', async () => {
     const r = await engine.questionAnswer(async () => { throw new Error('should not call llm') }, courseName, noteName, 'q1', 'A')
     assert(r.correct === true && r.score === 100, `expected correct, got ${JSON.stringify(r)}`)
     assert(r.explanation.includes('0 是自然数'), 'explanation missing')
+    assert(typeof r.due === 'string' && r.due > todayStr(), `fsrs due missing: ${r.due}`)
+    assert(r.mastery > 0, `mastery=${r.mastery}`)
+    const bank = await engine.bank.load(engine.paths.courseRoot(courseRoot), noteName)
+    const q1 = bank.questions.find(q => q.id === 'q1')
+    assert(q1.fsrs?.reps === 1 && q1.stats?.attempts === 1 && q1.stats.correct === 1, 'question fsrs/stats not written')
   })
   await step('questionAnswer 错误(fill_in_blank)', async () => {
     const r = await engine.questionAnswer(async () => { throw new Error('should not call llm') }, courseName, noteName, 'q2', '1')
     assert(r.correct === false, 'expected wrong answer')
     assert(String(r.answer).includes('0'), 'correct answer not revealed')
   })
-  await step('practice 证据落盘（frontmatter EMA + JSONL）', async () => {
+  await step('practice 证据落盘（frontmatter EMA + JSONL + stage→learning）', async () => {
     const { state } = await engine.loadView({ name: courseName, root: courseRoot })
     const fm = state[noteName]
     assert(fm.practice.attempts === 2, `attempts=${fm.practice.attempts}`)
     assert(fm.practice.correct === 1, `correct=${fm.practice.correct}`)
-    assert(fm.practice_ema > 0 && fm.practice_ema < 1, `ema=${fm.practice_ema}`)
+    assert(fm.stage === 'learning', `stage=${fm.stage}（首答应推进 learning）`)
     const practiceTxt = readFileSync(join(dstCenter, 'state', 'practice.jsonl'), 'utf8')
     assert(practiceTxt.includes('"qid":"q1"'), 'practice jsonl missing qid')
-  })
-  await step('today 工作单生成', async () => {
-    const r = await engine.today(25)
-    assert(r.message.includes('工作单已生成'), r.message)
-  })
-  await step('settle 无评分条目 → 拒绝', async () => {
-    const r = await engine.settle()
-    assert(r.code === 1 && r.message.includes('没有已评分条目'), r.message)
-  })
-  await step('grade 单条补录 → fsrs/journal', async () => {
-    const out = await engine.grade(`${courseName}/${noteName}`, 3)
-    assert(out.includes('[grade]'), out)
-    const { state } = await engine.loadView({ name: courseName, root: courseRoot })
-    assert(state[noteName].fsrs && state[noteName].fsrs.reps === 1, 'fsrs not applied')
-    assert(state[noteName].stage === 'review', `stage=${state[noteName].stage}`)
-    const journalTxt = readFileSync(join(dstCenter, 'state', 'journal.jsonl'), 'utf8')
-    assert(journalTxt.includes('"kind":"learn"'), 'journal missing learn row')
   })
   await step('statusJson 反映到期', async () => {
     const doc = await engine.statusJson()
@@ -168,16 +161,21 @@ async function run() {
     const doc = await engine.doctor()
     assert(doc.courses.length === 1, 'doctor shape')
   })
-  await step('checkin/calendar/tags/questionsAll（面板扩展接口）', async () => {
-    const ck = await engine.checkinToday()
-    assert(ck.journal >= 1, `checkin journal=${ck.journal}`)
-    const cal = await engine.calendarStats(new Date().getFullYear())
-    assert(cal.days.some(d => d.total > 0), 'calendar has no activity day')
-    await engine.setCourseTags(courseName, ['e2e-tag'])
-    const tags = await engine.listTags()
-    assert(tags.includes('e2e-tag'), 'course tag missing')
-    await engine.questionAdd(courseName, noteName, { kind: 'true_false', q: '追加题', answer: false, tags: ['e2e-q'] })
-    await engine.setQuestionTags(courseName, noteName, 'q1', ['入门'])
+  await step('skip/complete + questionsAll（面板扩展接口）', async () => {
+    // 完成确认：未作答题初始化 FSRS + stage→review
+    const done = await engine.nodeComplete(courseName, noteName)
+    assert(done.stage === 'review', `complete stage=${done.stage}`)
+    const { state } = await engine.loadView({ name: courseName, root: courseRoot })
+    assert(state[noteName].stage === 'review', `stage=${state[noteName].stage}`)
+    // 跳过：另一节点 stage→skipped
+    const all0 = await engine.questionsAll()
+    const otherNode = all0.questions.find(q => q.node !== noteName)?.node
+    if (otherNode) {
+      const skip = await engine.nodeSkip(courseName, otherNode, true)
+      assert(skip.stage === 'skipped', `skip stage=${skip.stage}`)
+      await engine.nodeSkip(courseName, otherNode, false)
+    }
+    await engine.questionAdd(courseName, noteName, { kind: 'true_false', q: '追加题', answer: false })
     const all = await engine.questionsAll()
     assert(all.total === 3, `questionsAll total=${all.total}`)
     assert(!('answer' in all.questions[0]), 'answers must not leak in questionsAll')

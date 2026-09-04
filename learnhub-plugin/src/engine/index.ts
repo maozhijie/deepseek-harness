@@ -15,7 +15,7 @@ import { Registry } from './registry.ts'
 import { Store } from './store.ts'
 import { GraphStore, Graph, writeReadyList } from './graph.ts'
 import { stateMap, loadNote, saveNote, defaultFrontmatter, asFm } from './notes.ts'
-import { getScheduler, applyRating, stageAfter, masteryValue } from './srs.ts'
+import { getScheduler, applyRatingBlock } from './srs.ts'
 import { runAudit, effectiveStage } from './audit.ts'
 import { analyzeGraph } from './analysis.ts'
 import { Content } from './content.ts'
@@ -52,12 +52,7 @@ export class LearnhubEngine {
     this.content = new Content(this.paths)
     this.bank = new QuestionBank(this.paths)
     this.proposals = new GraphProposals(this.paths, this.store, this.registry, centerRoot)
-    this.sessions = new Sessions(this.paths, this.store, this.registry,
-      async course => this.loadView(course), undefined as never, this.content)
-    // settleRating 需要 engine 自身方法，二次注入（避免构造顺序问题）
-    ;(this.sessions as unknown as { settleRating: unknown }).settleRating =
-      (courseName: string, graph: Graph, node: string, rating: number, today: string, sessionId: string) =>
-        this.settleRating(courseName, graph, node, rating, today, sessionId)
+    this.sessions = new Sessions(this.paths, async course => this.loadView(course))
   }
 
   // ---- 加载与解析 ----
@@ -97,41 +92,6 @@ export class LearnhubEngine {
     return { course: hits[0], node: nodeSpec }
   }
 
-  // ---- 评分落盘（D15 唯一入口） ----
-
-  /** 单节点评分落盘：frontmatter + journal。settle/grade 的共享底层。 */
-  async settleRating(
-    courseName: string, graph: Graph, node: string, rating: number, today: string, sessionId: string,
-  ): Promise<{ rec: Record<string, unknown>; newFs: FsrsBlock; kind: string; stage: string }> {
-    const course = await this.registry.get(courseName)
-    if (!course) throw new Error(`[settle] 注册表中没有课程「${courseName}」。`)
-    const { state } = await this.loadView(course)
-    const fm = state[node] ?? (await this.ensureNote(course.root, graph, node))
-    const sched = await getScheduler(this.paths, this.paths.courseRoot(course.root))
-    const firstLearn = !fm.fsrs?.reps
-    const { fs: newFs, meta } = applyRating(fm, rating, today, sched)
-    const nextStage = stageAfter(newFs, rating, firstLearn)
-    const practice = await this.store.attemptStats(courseName, node)
-    const next: Fm = {
-      ...fm,
-      stage: nextStage,
-      fsrs: newFs,
-      mastery: masteryValue(newFs, fm.practice, fm.practice_ema),
-    }
-    void practice
-    const [, regionName] = graph.blockOf[node]
-    const path = this.paths.courseNotePath(course.root, regionName, node)
-    await saveNote(path, next as unknown as Record<string, unknown>, (await loadNote(path)).body)
-    const rec = await this.store.appendJournal({
-      course: courseName, node, rating, kind: meta.kind,
-      elapsed_days: meta.elapsed_days, session: sessionId,
-    })
-    // T1/T2 触发：阶段变化 → 预生成入队
-    const { state: stateNow } = await this.loadView(course)
-    await this.content.onStageChange(course.root, graph, stateNow, node, nextStage)
-    return { rec: rec as unknown as Record<string, unknown>, newFs, kind: meta.kind, stage: nextStage }
-  }
-
   /** 无笔记节点补占位文件（保证 frontmatter 始终可查）。 */
   private async ensureNote(root: string, graph: Graph, node: string): Promise<Fm> {
     const [, regionName] = graph.blockOf[node]
@@ -141,27 +101,43 @@ export class LearnhubEngine {
     return fm
   }
 
-  // ---- status / recommend / today / settle / grade ----
+  // ---- status / recommend ----
 
   async statusJson(): Promise<Record<string, unknown>> {
-    return this.sessions.statusJson(await this.enabledCourses())
+    const bankDue = await this.bankDueAll()
+    return this.sessions.statusJson(await this.enabledCourses(), bankDue)
   }
 
   async recommend(limit = 5): Promise<Record<string, unknown>> {
-    const events = await this.sessions.recommendEvents(await this.enabledCourses(), todayStr(), limit)
+    const bankDue = await this.bankDueAll()
+    const events = await this.sessions.recommendEvents(await this.enabledCourses(), bankDue, todayStr(), limit)
     return { date: todayStr(), events }
   }
 
-  async today(minutes: number): Promise<{ message: string }> {
-    return this.sessions.today(await this.enabledCourses(), Math.round(minutes))
-  }
-
-  async settle(dateStr?: string): Promise<{ message: string; code: number }> {
-    return this.sessions.settle(dateStr)
-  }
-
-  async grade(nodeSpec: string, rating: number): Promise<string> {
-    return this.sessions.grade(nodeSpec, rating, await this.enabledCourses())
+  /** 全部启用课程的题库到期聚合：node 级最小题目 due（复习队列的数据源）。 */
+  private async bankDueAll(): Promise<Map<string, Array<{ node: string; due: string; count: number }>>> {
+    const out = new Map<string, Array<{ node: string; due: string; count: number }>>()
+    const today = todayStr()
+    for (const c of await this.enabledCourses()) {
+      const items: Array<{ node: string; due: string; count: number }> = []
+      let files: string[] = []
+      try {
+        files = await readdir(this.paths.bankDir(c.root))
+      } catch {
+        out.set(c.name, items)
+        continue
+      }
+      for (const f of files.filter(f => f.endsWith('.yaml'))) {
+        const node = f.replace(/\.yaml$/, '')
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
+        const dues = bank.questions
+          .filter(q => !q.archived && q.fsrs?.reps && q.fsrs.due <= today)
+          .map(q => q.fsrs!.due)
+        if (dues.length) items.push({ node, due: dues.sort()[0], count: dues.length })
+      }
+      out.set(c.name, items)
+    }
+    return out
   }
 
   // ---- doctor（fm schema 对账） ----
@@ -189,7 +165,7 @@ export class LearnhubEngine {
       const audit = await runAudit(this.paths, c.root, c.name, graph, regions)
       if (audit.failed) failed = true
       lines.push(`[${c.name}] 审计：ERROR ${audit.errors.length} | WARN ${audit.warns.length} | INFO ${audit.infos.length}${audit.failed ? '（阻断）' : ''}`)
-      const done = new Set(Object.entries(state).filter(([, f]) => ['review', 'mastered'].includes(f.stage)).map(([n]) => n))
+      const done = new Set(Object.entries(state).filter(([, f]) => ['review', 'mastered', 'skipped'].includes(f.stage)).map(([n]) => n))
       await writeReadyList(this.paths, c.root, graph, done)
     }
     if (failed) throw new Error(`[rebuild] 审计存在 ERROR：\n${lines.join('\n')}`)
@@ -284,17 +260,6 @@ export class LearnhubEngine {
     })
   }
 
-  async genExercises(courseKey: string | undefined, node: string, yamlText: string): Promise<Record<string, unknown>> {
-    const c = await this.registry.resolve(courseKey)
-    const { graph } = await this.loadView(c)
-    return this.content.genExercises(
-      c.root, graph, node, yamlText,
-      async n => (await this.loadView(c)).state[n],
-      rec => this.store.appendJournal({ ...rec, course: c.name }),
-      node,
-    )
-  }
-
   async contentQueue(courseKey: string | undefined, node: string): Promise<string> {
     const c = await this.registry.resolve(courseKey)
     return this.content.queueManual(c.root, node)
@@ -310,59 +275,13 @@ export class LearnhubEngine {
     return out
   }
 
-  // ---- 练习与判卷 ----
-
-  async exercises(courseKey: string | undefined, node: string): Promise<Record<string, unknown>[]> {
-    const c = await this.registry.resolve(courseKey)
-    const { graph } = await this.loadView(c)
-    return this.sessions.exercises(c.root, graph, node)
-  }
-
   async lesson(courseKey: string | undefined, node: string): Promise<Record<string, unknown>> {
     const c = await this.registry.resolve(courseKey)
     const { graph, state } = await this.loadView(c)
-    return this.sessions.lesson(c.name, c.root, graph, state, node)
-  }
-
-  async check(courseKey: string | undefined, node: string, exNo: number, answer: string): Promise<Record<string, unknown>> {
-    const c = await this.registry.resolve(courseKey)
-    const { graph } = await this.loadView(c)
-    return this.sessions.check(c.name, c.root, graph, node, exNo, answer)
-  }
-
-  async recordAttempt(courseKey: string | undefined, node: string, exNo: number, answer: string, judge: string, correct: boolean | null, feedback?: string): Promise<Record<string, unknown>> {
-    const c = await this.registry.resolve(courseKey)
-    const { graph } = await this.loadView(c)
-    return this.sessions.recordAttempt(c.name, c.root, graph, node, exNo, answer, judge, correct, feedback)
-  }
-
-  /** AI 反思判卷（reflection / ai 题）：题目+评分要点+作答 → 模型 → {score, feedback}。
-   * 完成后自动 record-attempt 入流水（correct = score ≥ 0.6）。 */
-  async aiGrade(
-    llmComplete: (prompt: string, system?: string) => Promise<string>,
-    courseKey: string | undefined, node: string, exNo: number, answer: string,
-  ): Promise<Record<string, unknown>> {
-    const info = await this.check(courseKey, node, exNo, '')
-    if (info.judge !== 'ai') throw new Error(`ex${exNo} 不是 AI 判卷题（judge=${String(info.judge)}）。`)
-    const rubric = String(info.answer ?? '')
-    const raw = await llmComplete(
-      `## 题目\n\n${String(info.q ?? '')}\n\n## 评分要点\n\n${rubric}\n\n## 学生作答\n\n${answer}`,
-      REFLECTION_GRADING_SYSTEM,
-    )
-    let score = 0
-    let feedback = ''
-    try {
-      const v = parseReflectionGrading(raw)
-      score = v.score
-      feedback = v.feedback
-    } catch {
-      // 解析失败降级：非空作答按半对处理（不静默丢给规则判卷，保底可用）
-      score = answer.trim() ? 0.5 : 0
-      feedback = raw.slice(0, 500)
-    }
-    const correct = score >= 0.6
-    await this.recordAttempt(courseKey, node, exNo, answer, 'ai', correct, feedback)
-    return { score: Math.round(score * 100), correct, feedback, raw }
+    const lesson = await this.sessions.lesson(c.name, c.root, graph, state, node)
+    // 刷卡模型：mastery 由题库作答数据派生（节点 frontmatter 的旧字段不再使用）
+    ;(lesson as Record<string, unknown>).mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node)
+    return lesson
   }
 
   // ---- note resolve / 反馈区读取 ----
@@ -428,17 +347,21 @@ export class LearnhubEngine {
     return { courses }
   }
 
-  /** 某节点题库题目列表（不含答案/评分要点）。 */
+  /** 某节点题库题目列表（不含答案/评分要点；带到期日与作答统计——刷卡视图）。 */
   async questions(courseKey: string | undefined, node: string): Promise<Record<string, unknown>> {
     const c = await this.registry.resolve(courseKey)
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
     return {
       course: c.name, node,
+      mastery: await this.nodeMastery(this.paths.courseRoot(c.root), node),
       questions: bank.questions.filter(q => q.archived !== true).map((q, i) => ({
         id: q.id, kind: q.kind, q: q.q, no: i + 1,
         difficulty: q.difficulty ?? 1,
         ...(q.options?.length ? { options: q.options } : {}),
         hasExplanation: Boolean(q.explanation),
+        due: q.fsrs?.reps ? q.fsrs.due : null,
+        attempts: q.stats?.attempts ?? 0,
+        lastCorrect: q.stats?.attempts ? (q.stats.correct / q.stats.attempts) >= 0.6 : null,
       })),
     }
   }
@@ -496,8 +419,25 @@ export class LearnhubEngine {
     const fm = asFm(rawFm)
     if (fm) {
       const next = applyPracticeEvidence(fm, correct ? 1.0 : 0.0)
+      // 刷卡模型：首答把节点从 ready/unseen 推进 learning（后续调度由题目聚合驱动）
+      if (next.stage === 'ready' || next.stage === 'unseen') next.stage = 'learning'
       await saveNote(path, next as unknown as Record<string, unknown>, body)
+      if (next.stage !== fm.stage) {
+        const { state: stateNow } = await this.loadView(c)
+        await this.content.onStageChange(c.root, graph, stateNow, node, next.stage)
+      }
     }
+    // 题目级 FSRS：作答对错映射 rating（对=3、错=1）推进该题调度并写回题库
+    const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root))
+    const today = todayStr()
+    const { fs } = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched)
+    const stats = {
+      attempts: (q.stats?.attempts ?? 0) + 1,
+      correct: (q.stats?.correct ?? 0) + (correct ? 1 : 0),
+      last: today,
+    }
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { fsrs: fs, stats })
+    const mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node)
     return {
       correct, score: Math.round(score * 100), feedback,
       explanation: q.explanation ?? '',
@@ -506,67 +446,91 @@ export class LearnhubEngine {
         : q.kind === 'fill_in_blank' ? (Array.isArray(q.answer) ? q.answer.join(' / ') : q.answer)
         : String(q.answer),
       kind: q.kind,
+      due: fs.due,
+      mastery,
     }
   }
 
-  // ---- 学习面板扩展（打卡/日历/标签/题目管理/课程删除）----
-
-  /** 今日打卡状态（本地日；journal/practice 有行为即打卡，行为流水即事实）。 */
-  async checkinToday(): Promise<{ checked: boolean; journal: number; practice: number; total: number }> {
-    const byDay = await this.store.activityCounts()
-    const today = byDay[todayStr()] ?? { journal: 0, practice: 0, total: 0 }
-    return { checked: today.total > 0, journal: today.journal, practice: today.practice, total: today.total }
+  /** 节点掌握度 = 该节点全部题目的作答正确率汇总（Σcorrect/Σattempts；无作答 → 0）。 */
+  private async nodeMastery(courseRoot: string, node: string): Promise<number> {
+    const bank = await this.bank.load(courseRoot, node)
+    let attempts = 0
+    let correct = 0
+    for (const q of bank.questions) {
+      if (q.archived) continue
+      attempts += q.stats?.attempts ?? 0
+      correct += q.stats?.correct ?? 0
+    }
+    if (!attempts) return 0
+    return Math.round((correct / attempts) * 100) / 100
   }
 
-  /** 日历热力图数据（指定年；month 缺省=全年）。 */
-  async calendarStats(year: number, month?: number): Promise<{
-    year: number; month: number | null
-    days: Array<{ date: string; journal: number; practice: number; total: number }>
-  }> {
-    const byDay = await this.store.activityCounts()
-    const days = Object.entries(byDay)
-      .filter(([date]) => {
-        const m = date.match(/^(\d{4})-(\d{2})/)
-        if (!m || +m[1] !== year) return false
-        return month === undefined || +m[2] === month
-      })
-      .map(([date, c]) => ({ date, journal: c.journal, practice: c.practice, total: c.total }))
-      .sort((a, b) => a.date.localeCompare(b.date))
-    return { year, month: month ?? null, days }
+  // ---- 节点跳过 / 完成确认 ----
+
+  /** 跳过（已有基础）：stage 置 skipped，调度视同已通过；取消跳过回 ready。 */
+  async nodeSkip(courseKey: string | undefined, node: string, skipped: boolean): Promise<{ course: string; node: string; stage: Stage }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[skip] 节点「${node}」不在图内。`)
+    if (!state[node]) await this.ensureNote(c.root, graph, node)
+    const stage: Stage = skipped ? 'skipped' : 'ready'
+    const [, regionName] = graph.blockOf[node]
+    const path = this.paths.courseNotePath(c.root, regionName, node)
+    const { fm: rawFm, body } = await loadNote(path)
+    const fm = asFm(rawFm)
+    if (fm) await saveNote(path, { ...fm, stage } as unknown as Record<string, unknown>, body)
+    return { course: c.name, node, stage }
   }
 
-  /** 全中心标签聚合（课程 tags + 启用课程全部题库的题目 tags，去重排序）。 */
-  async listTags(): Promise<string[]> {
-    const tags = new Set<string>()
-    const courses = await this.registry.enabled()
-    for (const c of courses) (c.tags ?? []).forEach(t => tags.add(t))
-    for (const c of courses) {
-      let files: string[] = []
-      try {
-        files = await readdir(this.paths.bankDir(c.root))
-      } catch {
+  /** 完成确认：本轮内容已学——全部未归档题目纳入复习循环（已作答的按各自 FSRS
+   * 调度到期复习，没作答的初始化为明天起刷），节点 stage→review。节点 frontmatter
+   * 同步写一份「聚合代表」fsrs（全部题里到期最早的那张卡）：审计 E5 要求 review
+   * 有 fsrs，且 R_gate 的可提取性仍从节点状态读。 */
+  async nodeComplete(courseKey: string | undefined, node: string): Promise<{ course: string; node: string; stage: Stage; initialized: number; due: string | null }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[complete] 节点「${node}」不在图内。`)
+    if (!state[node]) await this.ensureNote(c.root, graph, node)
+    const courseRoot = this.paths.courseRoot(c.root)
+    const sched = await getScheduler(this.paths, courseRoot)
+    const today = todayStr()
+    const bank = await this.bank.load(courseRoot, node)
+    let initialized = 0
+    let due: string | null = null
+    let repCard: FsrsBlock | null = null
+    for (const q of bank.questions) {
+      if (q.archived) continue
+      if (q.fsrs?.reps) {
+        const d = q.fsrs.due
+        if (d && (!due || d < due)) { due = d; repCard = q.fsrs }
         continue
       }
-      for (const f of files.filter(f => f.endsWith('.yaml'))) {
-        const bank = await this.bank.load(this.paths.courseRoot(c.root), f.replace(/\.yaml$/, ''))
-        bank.questions.forEach(q => (q.tags ?? []).forEach(t => tags.add(t)))
-      }
+      const { fs } = applyRatingBlock(null, 3, today, sched)
+      await this.bank.updateQuestion(courseRoot, node, q.id, { fsrs: fs })
+      initialized++
+      if (!due || fs.due < due) { due = fs.due; repCard = fs }
     }
-    return [...tags].sort()
+    if (state[node]?.stage === 'mastered' || state[node]?.stage === 'skipped') {
+      return { course: c.name, node, stage: state[node].stage, initialized, due }
+    }
+    const [, regionName] = graph.blockOf[node]
+    const path = this.paths.courseNotePath(c.root, regionName, node)
+    const { fm: rawFm, body } = await loadNote(path)
+    const fm = asFm(rawFm)
+    if (fm && fm.stage !== 'review') {
+      const next: Fm = { ...fm, stage: 'review' }
+      if (repCard) next.fsrs = repCard
+      next.mastery = await this.nodeMastery(courseRoot, node)
+      await saveNote(path, next as unknown as Record<string, unknown>, body)
+      const { state: stateNow } = await this.loadView(c)
+      await this.content.onStageChange(c.root, graph, stateNow, node, 'review')
+    }
+    return { course: c.name, node, stage: 'review', initialized, due }
   }
 
-  async setCourseTags(courseKey: string, tags: string[]): Promise<{ course: string; tags: string[] }> {
-    const c = await this.registry.resolve(courseKey)
-    return { course: c.name, tags: await this.registry.setTags(c.name, tags) }
-  }
+  // ---- 学习面板扩展（题目管理/课程删除）----
 
-  async setQuestionTags(courseKey: string, node: string, qid: string, tags: string[]): Promise<{ course: string; node: string; qid: string; tags: string[] }> {
-    const c = await this.registry.resolve(courseKey)
-    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { tags })
-    return { course: c.name, node, qid, tags }
-  }
-
-  /** 全部题库条目（题目管理列表；不含答案）。 */
+  /** 全部题库条目（题目管理列表；不含答案，带到期与统计）。 */
   async questionsAll(courseKey?: string): Promise<{ total: number; questions: Array<Record<string, unknown>> }> {
     const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled()
     const out: Array<Record<string, unknown>> = []

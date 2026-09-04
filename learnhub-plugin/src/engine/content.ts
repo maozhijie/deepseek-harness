@@ -186,23 +186,6 @@ export class Content {
 
 只输出课程笔记正文（不含 frontmatter），不要附加解释。
 `,
-    AI判卷: `\
-# AI 判卷提示词（用户可编辑；题目/参考答案/学生作答由系统拼在本模板之后）
-
-你是严格的阅卷老师。根据题目、评分要点与学生作答，给出评判。
-
-## 评分标准
-
-- 核心结论正确且关键步骤/理由到位：score ≥ 0.8（判对）；
-- 方向对但有缺漏或小错：score 0.5–0.79（半对）；
-- 结论错误或未作答到点：score < 0.5（判错）。
-
-## 输出格式（只输出一个 JSON，不要任何其他文字）
-
-\`\`\`json
-{"score": 0-1小数, "verdict": "对|半对|错", "feedback": "针对作答的具体点评", "suggestions": "下一步怎么改进"}
-\`\`\`
-`,
     题目生成: `\
 # 题目生成提示词（用户可编辑；节点正文由系统附在本模板之后）
 
@@ -506,73 +489,6 @@ questions:
         exercises,
       },
     }
-  }
-
-  /** 题组过门禁后写入练习区。返回结果对象；门禁失败抛错（错误行已拼入）。 */
-  async genExercises(
-    root: string, graph: Graph, node: string, yamlText: string,
-    fmOf: (n: string) => Fm | undefined,
-    journal: (rec: Omit<JournalRec, 'ts'>) => Promise<unknown>,
-    expectedNode?: string,
-  ): Promise<{ node: string; mode: string; count: number; range: [number, number]; path: string }> {
-    const doc = YAML.parse(yamlText)
-    const v = Content.validateExerciseSet(doc)
-    if (!v.ok) throw new Error(`[gen-exercises] schema 校验失败，题组未写入。\n${v.errors.map(e => `  ✗ ${e}`).join('\n')}`)
-    const spec = v.spec
-    if (expectedNode && expectedNode !== spec.node) {
-      throw new Error(`[gen-exercises] 命令行节点「${expectedNode}」与题组文件内 node「${spec.node}」不一致。`)
-    }
-    if (!graph.nset.has(spec.node)) throw new Error(`[gen-exercises] 节点「${spec.node}」不在图内。`)
-
-    const errors: string[] = []
-    spec.exercises.forEach((e, i) => {
-      for (const u of e.uses ?? []) {
-        if (!graph.nset.has(u)) errors.push(`第${i + 1}题 uses 含图外节点: ${u}`)
-      }
-      if (e.check === 'choice') {
-        const letters = (e.options ?? []).map((_, j) => String.fromCharCode(65 + j))
-        if (!e.options?.length || !letters.includes(normChoice(e.answer!))) {
-          errors.push(`第${i + 1}题（choice）answer 必须是合法选项字母（选项 ${e.options?.length ?? 0} 个）`)
-        }
-      }
-    })
-    if (errors.length) throw new Error(`[gen-exercises] 门禁未过，题组未写入（修正后重提）。\n${errors.map(e => `  ✗ ${e}`).join('\n')}`)
-
-    const [, regionName] = graph.blockOf[spec.node]
-    const path = this.paths.courseNotePath(root, regionName, spec.node)
-    const { fm, body } = await loadNote(path)
-    if (!fm) throw new Error(`[gen-exercises] 课程文件不存在（先 content apply 正文）: ${spec.node}`)
-
-    let startNo = 1
-    const secMatch = body.match(/## 练习\s*\n([\s\S]*?)(?=\n## |$)/)
-    if (spec.mode === 'append' && secMatch) startNo = Content.practiceMeta(secMatch[1]).length + 1
-    const lines = spec.exercises.map((e, i) => this.exerciseMetaLine(startNo + i, e))
-    let section = lines.join('\n') + '\n'
-    if (spec.mode === 'append' && secMatch) section = secMatch[1].replace(/\n+$/, '') + '\n' + section
-    const newBody = this.replaceExerciseSection(body, section)
-    await saveNote(path, fm, newBody)
-    await journal({
-      course: '', node: spec.node, rating: null, kind: 'exercises_gen',
-      elapsed_days: 0,
-      detail: `${spec.mode} 题组 ${spec.exercises.length} 道（ex${startNo}–ex${startNo + spec.exercises.length - 1}）`,
-    })
-    return { node: spec.node, mode: spec.mode, count: spec.exercises.length, range: [startNo, startNo + spec.exercises.length - 1], path }
-  }
-
-  /** 单题 → 元数据注释行 + 题干行。 */
-  private exerciseMetaLine(i: number, e: ExerciseMeta): string {
-    const parts = [`answer: ${e.answer}`, `check: ${e.check}`, `difficulty: ${e.difficulty ?? 1}`, `uses: [${(e.uses ?? []).join(', ')}]`]
-    if (e.check === 'choice' && e.options?.length) parts.unshift(`options: ${e.options.join('；')}`)
-    if (e.check === 'sympy' && e.tol) parts.push(`tol: ${e.tol}`)
-    return `<!-- ex:${i} | ${parts.join(' | ')} -->\n${i}. ${e.q}`
-  }
-
-  /** 正文的「## 练习」区替换（无该区则追加到正文末尾）。 */
-  private replaceExerciseSection(body: string, sectionText: string): string {
-    const nl = String.fromCharCode(10)
-    const m = body.match(/## 练习\s*\n[\s\S]*?(?=\n## |$)/)
-    if (m) return body.slice(0, m.index) + '## 练习' + nl + sectionText + body.slice(m.index! + m[0].length)
-    return (body || '').replace(new RegExp(nl + '+$'), '') + nl + nl + '## 练习' + nl + sectionText
   }
 
   /** 手动插队（T3）。 */

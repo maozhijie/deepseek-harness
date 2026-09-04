@@ -1,9 +1,8 @@
-/** 学习页（主界面）：打卡横幅 + 「接下来学/复习」推荐流（点开直接进 LessonView）
- * + 课程卡（次要区）。二级视图 LessonView 承载正文/做题/自评（最大最丰富）。
- * 移植 allo 学习页编排，复习语义映射 learnhub：作答对→rating3、错→rating1，
- * 自评 1-4，跳过不落分。 */
+/** 学习页（主界面）：复习横幅 + 「接下来学/复习」推荐流（点开直接进 LessonView）
+ * + 课程卡（次要区）。二级视图 LessonView 承载正文/做题/完成。
+ * 复习会话 = 刷卡：只列到期题，作答即驱动该题 FSRS 调度；无题节点提示出题。 */
 import {
-  Alert, Button, Card, Drawer, Empty, Input, Message, Modal, Progress, Space,
+  Alert, Button, Card, Empty, Input, Message, Modal, Progress, Space,
   Tag, Typography,
 } from '@arco-design/web-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -11,44 +10,31 @@ import LessonView from '../components/LessonView'
 import QuestionCard from '../components/QuestionCard'
 import { api } from '../api'
 import type { AppFrame } from '../App'
-import type { CheckinDoc, QuestionItem, RecEvent, RecommendDoc } from '../types'
+import type { QuestionItem, RecEvent, RecommendDoc } from '../types'
 
 const { Text, Title } = Typography
-
-const RATING_BTNS: Array<{ rating: number; label: string }> = [
-  { rating: 1, label: '忘了' }, { rating: 2, label: '困难' },
-  { rating: 3, label: '良好' }, { rating: 4, label: '简单' },
-]
 
 const REC_TYPE: Record<string, { label: string; color: string; order: number }> = {
   overdue: { label: '逾期', color: 'red', order: 0 },
   review: { label: '复习', color: 'green', order: 1 },
-  ready: { label: '就绪', color: 'blue', order: 2 },
+  learning: { label: '继续学', color: 'arcoblue', order: 2 },
   new: { label: '新学', color: 'cyan', order: 3 },
 }
 
-/** 打卡横幅：今日行为计数 + 开始复习。 */
-function CheckinBanner({ checkin, dueCount, onStart }: {
-  checkin: CheckinDoc | null
-  dueCount: number
-  onStart: () => void
-}) {
+const todayStr = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** 复习横幅：到期题驱动（有到期题的节点数 + 开始复习）。 */
+function ReviewBanner({ dueCount, onStart }: { dueCount: number; onStart: () => void }) {
   return (
     <Card size='small' style={{ borderRadius: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
         <div>
-          <Text type='secondary' style={{ display: 'block', fontSize: 12 }}>今日打卡</Text>
-          <Text style={{ fontSize: 20, fontWeight: 600, color: checkin?.checked ? 'var(--color-success-6,#00b42a)' : 'var(--color-text-2,#4e5969)' }}>
-            {checkin?.checked ? '已完成' : '未开始'}
-          </Text>
-        </div>
-        <div>
-          <Text type='secondary' style={{ display: 'block', fontSize: 12 }}>今日行为</Text>
-          <Text style={{ fontSize: 20, fontWeight: 600 }}>{checkin?.total ?? 0}</Text>
-        </div>
-        <div>
           <Text type='secondary' style={{ display: 'block', fontSize: 12 }}>待复习</Text>
           <Text style={{ fontSize: 20, fontWeight: 600 }}>{dueCount}</Text>
+          <Text type='secondary' style={{ fontSize: 12 }}> 个节点有到期题目</Text>
         </div>
         <Button type='primary' onClick={onStart} disabled={dueCount === 0} style={{ marginLeft: 'auto' }}>
           开始复习（{dueCount}）
@@ -62,7 +48,7 @@ function CheckinBanner({ checkin, dueCount, onStart }: {
 function RecCard({ e, onOpen }: { e: RecEvent; onOpen: () => void }) {
   const t = REC_TYPE[e.type] ?? { label: e.type, color: 'gray', order: 9 }
   return (
-    <Card size='small' hoverable style={{ borderRadius: 10, cursor: 'pointer', borderLeft: `3px solid var(--color-${t.color === 'red' ? 'danger' : t.color === 'green' ? 'success' : 'primary'}-6,#165dff)` }}>
+    <Card size='small' hoverable style={{ borderRadius: 10, cursor: 'pointer', borderLeft: `3px solid var(--color-${t.color === 'red' ? 'danger' : t.color === 'green' ? 'success' : t.color === 'arcoblue' ? 'arcoblue' : 'primary'}-6,#165dff)` }}>
       <div onClick={onOpen} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <Tag color={t.color}>{t.label}</Tag>
         <div style={{ minWidth: 0, flex: 1 }}>
@@ -79,18 +65,18 @@ function RecCard({ e, onOpen }: { e: RecEvent; onOpen: () => void }) {
   )
 }
 
-/** 课程卡（次要区）：进度 + 打开图/复习/标签/删除。 */
+/** 课程卡（次要区）：进度 + 打开图/复习/删除。计数语义：未学 = unseen+ready。 */
 function CourseCard(props: {
   name: string
-  counts: { unseen: number; ready: number; learning: number; review: number; mastered: number }
+  counts: { unseen: number; ready: number; learning: number; review: number; mastered: number; skipped: number }
   total: number
   due: number
   onOpen: () => void
   onReview: () => void
-  onTags: () => void
   onDelete: () => void
 }) {
-  const done = props.counts.mastered + props.counts.review
+  const notStarted = props.counts.unseen + props.counts.ready
+  const done = props.counts.mastered
   const percent = props.total ? Math.round((done / props.total) * 100) : 0
   return (
     <Card size='small' hoverable style={{ borderRadius: 10 }}>
@@ -98,16 +84,16 @@ function CourseCard(props: {
         <Title heading={6} style={{ margin: 0 }}>{props.name}</Title>
         <Progress percent={percent} showText size='small' />
         <Space size={4} wrap>
-          <Tag size='small' color='gray'>未学 {props.counts.unseen}</Tag>
-          <Tag size='small' color='arcoblue'>进行 {props.counts.learning + props.counts.ready}</Tag>
+          <Tag size='small' color='gray'>未学 {notStarted}</Tag>
+          <Tag size='small' color='arcoblue'>进行 {props.counts.learning}</Tag>
           <Tag size='small' color='green'>复习 {props.counts.review}</Tag>
-          <Tag size='small' color='green'>掌握 {props.counts.mastered}</Tag>
+          <Tag size='small' color='green'>掌握 {done}</Tag>
+          {props.counts.skipped > 0 && <Tag size='small' color='purple'>跳过 {props.counts.skipped}</Tag>}
           {props.due > 0 && <Tag size='small' color='red'>到期 {props.due}</Tag>}
         </Space>
         <Space size={6}>
           <Button size='mini' onClick={props.onOpen}>打开图</Button>
           <Button size='mini' onClick={props.onReview}>复习</Button>
-          <Button size='mini' type='text' onClick={props.onTags}>标签</Button>
           <Button size='mini' type='text' status='danger' onClick={props.onDelete}>删除</Button>
         </Space>
       </div>
@@ -115,7 +101,7 @@ function CourseCard(props: {
   )
 }
 
-/** 复习会话：逐条刷卡（题库作答或自评），对→3 错/忘→1，跳过不落分。 */
+/** 复习会话：逐节点刷卡（只列到期/未做过题），作答即驱动该题 FSRS；无题节点提示完成/出题。 */
 function ReviewSession(props: {
   queue: RecEvent[]
   onClose: () => void
@@ -123,7 +109,7 @@ function ReviewSession(props: {
 }) {
   const [idx, setIdx] = useState(0)
   const [questions, setQuestions] = useState<QuestionItem[] | null>(null)
-  const [busy, setBusy] = useState(false)
+  const today = todayStr()
   const item = props.queue[idx]
 
   const loadQuestions = useCallback(async () => {
@@ -131,32 +117,18 @@ function ReviewSession(props: {
     if (!item) return
     try {
       const bank = await api.questions(item.course, item.node)
-      setQuestions(bank.questions)
+      // 刷卡语义：到期题优先；无任何题 → 提示出题
+      const due = bank.questions.filter(q => q.due !== null && q.due <= today)
+      const fresh = bank.questions.filter(q => q.due === null)
+      setQuestions([...due, ...fresh])
     } catch {
       setQuestions([])
     }
-  }, [item])
+  }, [item, today])
 
   useEffect(() => { void loadQuestions() }, [loadQuestions])
 
   if (!item) return null
-
-  const rate = async (rating: number) => {
-    setBusy(true)
-    try {
-      await api.writeback(item.course, item.node, rating)
-      setIdx(i => i + 1)
-    } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const onAnswered = async (o: { correct: boolean | null; judge: string; feedback?: string }) => {
-    if (o.correct === true) await rate(3)
-    else if (o.correct === false) await rate(1)
-  }
 
   const finish = async () => {
     await props.onFinish()
@@ -165,8 +137,8 @@ function ReviewSession(props: {
 
   return (
     <Modal
-      title={`复习会话 ${idx + 1}/${props.queue.length}`} visible footer={null} unmountOnExit
-      onCancel={() => { if (!busy) void finish() }} style={{ width: 620 }}>
+      title={`复习 ${idx + 1}/${props.queue.length}`} visible footer={null} unmountOnExit
+      onCancel={() => { void finish() }} style={{ width: 620 }}>
       <Space direction='vertical' style={{ width: '100%' }} size={12}>
         <div>
           <Text type='secondary'>{item.course} · </Text>
@@ -177,57 +149,14 @@ function ReviewSession(props: {
           : questions.length > 0 ? (
             questions.map(q => (
               <QuestionCard key={q.id} course={item.course} node={item.node} question={q}
-                onDone={o => void onAnswered(o)} />
+                onDone={() => void loadQuestions()} />
             ))
           ) : (
-            <Alert type='info' content='该节点没有题库：按回忆质量自评（1 忘了 ~ 4 简单）' />
+            <Alert type='info' content='该节点还没有题目：在学习视图里「AI 出题」，或直接「完成学习」。' />
           )}
-        <Space size={8} wrap>
-          {RATING_BTNS.map(b => (
-            <Button key={b.rating} size='small' disabled={busy} onClick={() => void rate(b.rating)}>
-              {b.rating} · {b.label}
-            </Button>
-          ))}
-          <Button size='small' type='text' onClick={() => setIdx(i => i + 1)}>跳过</Button>
-        </Space>
+        <Button size='small' type='text' onClick={() => setIdx(i => i + 1)}>跳过此节点</Button>
       </Space>
     </Modal>
-  )
-}
-
-/** 标签编辑抽屉（课程级）。 */
-function TagEditor(props: { course: string; initial: string[]; allTags: string[]; onClose: () => void; onSaved: () => Promise<void> }) {
-  const [value, setValue] = useState(props.initial.join(','))
-  const [busy, setBusy] = useState(false)
-  const save = async () => {
-    setBusy(true)
-    try {
-      const tags = value.split(/[,，]/).map(s => s.trim()).filter(Boolean)
-      await api.setCourseTags(props.course, tags)
-      Message.success('标签已保存')
-      await props.onSaved()
-      props.onClose()
-    } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <Drawer width={420} visible onCancel={props.onClose} footer={null} title={`标签 · ${props.course}`} unmountOnExit>
-      <Space direction='vertical' style={{ width: '100%' }} size={10}>
-        {props.allTags.length > 0 && (
-          <Space size={6} wrap>
-            {props.allTags.map(t => (
-              <Tag key={t} size='small' color='purple' style={{ cursor: 'pointer' }}
-                onClick={() => setValue(v => v ? `${v},${t}` : t)}>{t}</Tag>
-            ))}
-          </Space>
-        )}
-        <Input value={value} onChange={setValue} placeholder='逗号分隔的标签' />
-        <Button type='primary' loading={busy} onClick={() => void save()}>保存</Button>
-      </Space>
-    </Drawer>
   )
 }
 
@@ -242,7 +171,7 @@ function CreateDialog(props: { visible: boolean; onClose: () => void }) {
           value='用 learnhub-graph-generate 技能，为我生成课程「<主题>」，起点：<已有基础>，目标：<学会什么>'
           readOnly autoSize={{ minRows: 3, maxRows: 4 }} />
         <Text type='secondary' style={{ fontSize: 12 }}>
-          提案生成后回到本面板「提案」页签审阅应用；在推荐流里点开节点即可「生成正文（自动出题）」。
+          提案生成后回到本面板「提案」页签审阅应用；在推荐流里点开节点即可「生成正文（自动出题）」。已有基础的节点可在学习视图里「跳过」。
         </Text>
       </Space>
     </Modal>
@@ -250,23 +179,13 @@ function CreateDialog(props: { visible: boolean; onClose: () => void }) {
 }
 
 export default function LearnPage({ frame }: { frame: AppFrame }) {
-  const [checkin, setCheckin] = useState<CheckinDoc | null>(null)
   const [rec, setRec] = useState<RecommendDoc | null>(null)
-  const [allTags, setAllTags] = useState<string[]>([])
   const [session, setSession] = useState<RecEvent[] | null>(null)
-  const [tagFor, setTagFor] = useState<string | null>(null)
   const [createVisible, setCreateVisible] = useState(false)
   const [runningJobs, setRunningJobs] = useState(0)
 
   const load = useCallback(async () => {
-    const [c, r, t] = await Promise.all([
-      api.checkinToday().catch(() => null),
-      api.recommend(12).catch(() => null),
-      api.tags().catch(() => []),
-    ])
-    setCheckin(c)
-    setRec(r)
-    setAllTags(t)
+    setRec(await api.recommend(12).catch(() => null))
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -322,8 +241,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
           <Button onClick={() => setCreateVisible(true)}>生成新课程</Button>
         </div>
       </div>
-      <CheckinBanner checkin={checkin} dueCount={reviewQueue.length}
-        onStart={() => setSession(reviewQueue)} />
+      <ReviewBanner dueCount={reviewQueue.length} onStart={() => setSession(reviewQueue)} />
 
       {/* 核心区：「接下来学/复习」推荐流——点开直接进学习视图 */}
       {frame.tree && frame.tree.courses.length === 0 ? (
@@ -349,14 +267,13 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
             return (
               <CourseCard
                 key={c.name} name={c.name} total={s?.total ?? 0} due={s?.due_today ?? 0}
-                counts={s?.counts ?? { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0 }}
+                counts={s?.counts ?? { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0, skipped: 0 }}
                 onOpen={() => { frame.setCourse(c.name); frame.goto('graph') }}
                 onReview={() => {
                   const q = reviewQueue.filter(e => e.course === c.name)
                   if (!q.length) { Message.info('该课程暂无到期复习'); return }
                   setSession(q)
                 }}
-                onTags={() => setTagFor(c.name)}
                 onDelete={() => deleteCourse(c.name)} />
             )
           })}
@@ -366,15 +283,6 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
       {session && session.length > 0 && (
         <ReviewSession queue={session} onClose={() => setSession(null)}
           onFinish={async () => { await Promise.all([frame.reload(), load()]) }} />
-      )}
-      {session && session.length === 0 && (
-        <Modal visible footer={null} onCancel={() => setSession(null)} title='复习'>
-          <Empty description='当前没有到期复习，先学新节点吧' />
-        </Modal>
-      )}
-      {tagFor && (
-        <TagEditor course={tagFor} initial={[]} allTags={allTags} onClose={() => setTagFor(null)}
-          onSaved={async () => { await Promise.all([frame.reload(), load()]) }} />
       )}
       {createVisible && <CreateDialog visible={createVisible} onClose={() => setCreateVisible(false)} />}
 

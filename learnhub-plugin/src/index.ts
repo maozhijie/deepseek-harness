@@ -115,46 +115,6 @@ async function apiRun<T>(tool: string, fn: () => Promise<T>): Promise<T> {
   return out
 }
 
-/** 展开 [[target|别名]]：取别名，否则取 target 最后一段。 */
-function unwrapLink(s: string): string {
-  const m = s.trim().match(/^\[\[(.+?)(?:\|(.+?))?\]\]$/)
-  if (!m) return s.trim()
-  if (m[2]) return m[2].trim()
-  return m[1].split('/').pop()!.trim()
-}
-
-/** D15：把评分写进今日工作单（## [课程] 段内命中节点评分行）——引擎外唯一允许的调度写。 */
-async function writeBack(course: string, node: string, rating: number): Promise<{ ok: boolean; message: string }> {
-  const today = new Date().toISOString().slice(0, 10)
-  const path = engine.paths.sessionPath(today)
-  let raw: string
-  try {
-    raw = await readFile(path, 'utf8')
-  } catch {
-    return { ok: false, message: '今日工作单不存在，先「生成今日工作单」。' }
-  }
-  const lines = raw.split('\n')
-  let section = ''
-  const lineRe = /^(\s*- \[[ xX]?\] (.+?) ｜.*?(?:首学评分|复习评分|评分)：)\s*\d?\s*$/
-  let hit = false
-  for (let i = 0; i < lines.length; i++) {
-    const hm = lines[i].match(/^##\s*\[(.+?)\]/)
-    if (hm) section = hm[1].trim()
-    if (section !== course) continue
-    const m = lines[i].match(lineRe)
-    if (m && unwrapLink(m[2]) === node) {
-      lines[i] = `${m[1]}${rating}`
-      hit = true
-      break
-    }
-  }
-  if (!hit) {
-    return { ok: false, message: `工作单的 [${course}] 段没有「${node}」的评分行（今日未排入？）` }
-  }
-  await writeFile(path, lines.join('\n'), 'utf8')
-  return { ok: true, message: `评分 ${rating} 已写回今日工作单，记得「结算」入库。` }
-}
-
 /** dsh llm 一次性调用：收集 text-delta；终止块非 success 即抛错。 */
 async function llmComplete(ctx: Context, prompt: string, system?: string): Promise<string> {
   const msg = createUserMessage({
@@ -248,15 +208,6 @@ function cancelGeneration(course: string, node: string): { cancelled: boolean; s
   return { cancelled: true, status: job.status }
 }
 
-/** AI 判卷（引擎 aiGrade：严格 JSON 解析 + 失败降级 + record-attempt）。 */
-async function aiGrade(ctx: Context, course: string, node: string, ex: number, answer: string): Promise<Record<string, unknown>> {
-  return engine.aiGrade(async (prompt, system) => {
-    if (system) return llmComplete(ctx, prompt, system)
-    const tpl = await engine.loadPrompt('AI判卷')
-    return llmComplete(ctx, `${tpl}\n\n${prompt}`)
-  }, course, node, ex, answer)
-}
-
 /** 发送 JSON 响应（no-store：状态类接口禁止浏览器缓存，保证评分后即时刷新）。 */
 function sendJson(res: ServerResponse, code: number, body: unknown): void {
   res.writeHead(code, {
@@ -281,14 +232,6 @@ function need(body: Record<string, unknown>, key: string): string {
   return v.trim()
 }
 
-/** 字符串或数字参数取值（引擎 JSON 的 ex 号是数字）。 */
-function needEx(body: Record<string, unknown>, key: string): number {
-  const v = body[key]
-  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
-  if (!Number.isFinite(n)) throw new Error(`missing required field: ${key}`)
-  return Math.round(n)
-}
-
 /** /learnhub/api/* 路由分发：客户端面板的全部后端入口（响应形状与 v2 一致）。 */
 async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost')
@@ -303,13 +246,6 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         name: c.name, root: c.root, enabled: String(c.enabled !== false),
       }))
       sendJson(res, 200, list)
-      return
-    }
-    if (req.method === 'GET' && route === '/exercises') {
-      const node = url.searchParams.get('node')
-      const course = url.searchParams.get('course')
-      if (!node || !course) throw new Error('missing required field: node/course')
-      sendJson(res, 200, await apiRun('api/exercises', () => engine.exercises(course, node)))
       return
     }
     if (req.method === 'GET' && route === '/lesson') {
@@ -380,21 +316,6 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       sendJson(res, 200, await apiRun('api/doctor', () => engine.doctor()))
       return
     }
-    if (req.method === 'GET' && route === '/checkins/today') {
-      sendJson(res, 200, await apiRun('api/checkins/today', () => engine.checkinToday()))
-      return
-    }
-    if (req.method === 'GET' && route === '/stats/calendar') {
-      const year = Number(url.searchParams.get('year')) || new Date().getFullYear()
-      const monthRaw = url.searchParams.get('month')
-      const month = monthRaw && Number.isFinite(Number(monthRaw)) ? Number(monthRaw) : undefined
-      sendJson(res, 200, await apiRun('api/stats/calendar', () => engine.calendarStats(year, month)))
-      return
-    }
-    if (req.method === 'GET' && route === '/tags') {
-      sendJson(res, 200, await apiRun('api/tags', () => engine.listTags()))
-      return
-    }
     if (req.method === 'GET' && route === '/questions-all') {
       const course = url.searchParams.get('course') ?? undefined
       sendJson(res, 200, await apiRun('api/questions-all', () => engine.questionsAll(course)))
@@ -406,38 +327,18 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
     }
     if (req.method === 'POST') {
       const body = await readJson(req)
-      if (route === '/today') {
-        const minutes = typeof body.minutes === 'number' && Number.isFinite(body.minutes) ? body.minutes : 25
-        sendJson(res, 200, { message: (await engine.today(minutes)).message })
-        return
-      }
-      if (route === '/settle') {
-        const r = await engine.settle()
-        if (r.code !== 0) throw new Error(r.message)
-        sendJson(res, 200, { message: r.message })
-        return
-      }
       if (route === '/rebuild') {
         sendJson(res, 200, { message: (await engine.rebuild()).message })
         return
       }
-      if (route === '/check') {
-        const out = await engine.check(need(body, 'course'), need(body, 'node'), needEx(body, 'ex'),
-          typeof body.answer === 'string' ? body.answer : '')
-        sendJson(res, 200, out)
+      if (route === '/node/skip') {
+        sendJson(res, 200, await apiRun('api/node/skip', () =>
+          engine.nodeSkip(need(body, 'course'), need(body, 'node'), body.skipped !== false)))
         return
       }
-      if (route === '/grade') {
-        const rating = Number(body.rating)
-        if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error('rating must be 1-4')
-        const out = await engine.grade(`${need(body, 'course')}/${need(body, 'node')}`, rating)
-        sendJson(res, 200, { message: out })
-        return
-      }
-      if (route === '/writeback') {
-        const rating = Number(body.rating)
-        if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error('rating must be 1-4')
-        sendJson(res, 200, await writeBack(need(body, 'course'), need(body, 'node'), rating))
+      if (route === '/node/complete') {
+        sendJson(res, 200, await apiRun('api/node/complete', () =>
+          engine.nodeComplete(need(body, 'course'), need(body, 'node'))))
         return
       }
       if (route === '/feedback') {
@@ -467,12 +368,6 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         const count = Number(body.count)
         sendJson(res, 200, await apiRun('api/question-generate', () =>
           generateQuiz(ctx, need(body, 'course'), need(body, 'node'), Number.isInteger(count) && count > 0 ? count : 6)))
-        return
-      }
-      if (route === '/ai-grade') {
-        sendJson(res, 200, await apiRun('api/ai-grade', () => aiGrade(
-          ctx, need(body, 'course'), need(body, 'node'), needEx(body, 'ex'),
-          typeof body.answer === 'string' ? body.answer : '')))
         return
       }
       if (route === '/review') {
@@ -514,17 +409,6 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
     }
     if (req.method === 'PUT') {
       const body = await readJson(req)
-      if (route === '/course/tags') {
-        const tags = Array.isArray(body.tags) ? body.tags.map(String) : []
-        sendJson(res, 200, await apiRun('api/course/tags', () => engine.setCourseTags(need(body, 'course'), tags)))
-        return
-      }
-      if (route === '/question/tags') {
-        const tags = Array.isArray(body.tags) ? body.tags.map(String) : []
-        sendJson(res, 200, await apiRun('api/question/tags', () =>
-          engine.setQuestionTags(need(body, 'course'), need(body, 'node'), need(body, 'qid'), tags)))
-        return
-      }
       if (route === '/question-update') {
         const patch = typeof body.patch === 'object' && body.patch !== null
           ? body.patch as Record<string, unknown> : {}
@@ -572,34 +456,25 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
   tool('learnhub_status',
     'Return the learning center status (center summary + per-course detail) as JSON.',
     {}, () => run('learnhub_status', async () => JSON.stringify(await engine.statusJson())))
-  tool('learnhub_today',
-    "Generate today's worksheet (会话/YYYY-MM-DD.md) aggregating all enabled courses.",
-    { minutes: { type: 'number', description: 'Available minutes today (default 25)' } },
-    (args: { minutes?: number }) => run('learnhub_today', async () =>
-      (await engine.today(args.minutes === undefined ? 25 : args.minutes)).message))
-  tool('learnhub_settle',
-    "Settle today's worksheet into the review system (per-section course attribution, audit-gated). Ratings must already be written into the worksheet.",
-    {}, () => run('learnhub_settle', async () => {
-      const r = await engine.settle()
-      if (r.code !== 0) throw new Error(r.message)
-      return r.message
-    }))
-  tool('learnhub_grade',
-    'Backfill a single 1-4 rating for a node (1=forgot, 2=hard, 3=normal, 4=easy). Use "course/node" when the node name is ambiguous across courses.',
+  tool('learnhub_skip',
+    'Mark a node as skipped (learner already knows it) or un-skip. Skipped nodes count as passed: they leave the recommendation queue and no longer block successors.',
     {
-      node: { type: 'string', required: true, description: 'Node name, or "course/node" to disambiguate' },
-      rating: { type: 'number', required: true, description: 'Rating 1-4' },
-    },
-    (args: { node: string; rating: number }) => run('learnhub_grade', () => engine.grade(args.node, args.rating)))
-  tool('learnhub_exercises',
-    'Fetch the exercise list of a course node as JSON (no answers). Fields: ex, q, difficulty, check (sympy|choice|ai|human), uses, options (choice only).',
-    {
-      node: { type: 'string', required: true, description: 'Node name' },
       course: { type: 'string', required: true, description: 'Course name' },
+      node: { type: 'string', required: true, description: 'Node name' },
+      skipped: { type: 'boolean', description: 'true to skip (default), false to un-skip' },
     },
-    (args: { node: string; course: string }) => run('learnhub_exercises', async () => JSON.stringify(await engine.exercises(args.course, args.node))))
+    (args: { course: string; node: string; skipped?: boolean }) => run('learnhub_skip', async () =>
+      JSON.stringify(await engine.nodeSkip(args.course, args.node, args.skipped !== false))))
+  tool('learnhub_complete',
+    'Confirm a node has been learned this round: unanswered bank questions get their FSRS card initialized (due tomorrow) and the node stage moves to review, entering the review rotation.',
+    {
+      course: { type: 'string', required: true, description: 'Course name' },
+      node: { type: 'string', required: true, description: 'Node name' },
+    },
+    (args: { course: string; node: string }) => run('learnhub_complete', async () =>
+      JSON.stringify(await engine.nodeComplete(args.course, args.node))))
   tool('learnhub_lesson',
-    "Fetch one node's lesson pack as JSON: course body split into teaching sections (练习/反馈 excluded, 答案 merged into 例题), its exercises, prereqs, and suggested next nodes. Use this to teach a node step by step.",
+    "Fetch one node's lesson pack as JSON: course body split into teaching sections (练习/反馈 excluded, 答案 merged into 例题), prereqs, and suggested next nodes. Use this to teach a node step by step.",
     {
       node: { type: 'string', required: true, description: 'Node name' },
       course: { type: 'string', required: true, description: 'Course name' },
@@ -610,16 +485,6 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     { limit: { type: 'number', description: 'Max events to return (default 5)' } },
     (args: { limit?: number }) => run('learnhub_recommend', async () =>
       JSON.stringify(await engine.recommend(args.limit === undefined ? 5 : args.limit))))
-  tool('learnhub_check',
-    'Judge one exercise answer. sympy/choice return correct boolean; ai returns {"judge":"ai","q","answer":rubric} without recording (the panel route /ai-grade does the model call); human returns {"judge":"human","answer":reference} for self-grading.',
-    {
-      node: { type: 'string', required: true, description: 'Node name' },
-      ex: { type: 'string', required: true, description: 'Exercise number, e.g. "ex1"' },
-      answer: { type: 'string', required: true, description: 'User answer ("" for human exercises)' },
-      course: { type: 'string', required: true, description: 'Course name' },
-    },
-    (args: { node: string; ex: string; answer: string; course: string }) => run('learnhub_check', async () =>
-      JSON.stringify(await engine.check(args.course, args.node, Number(args.ex), args.answer))))
   tool('learnhub_rebuild',
     'Run audit gate + ready-list regeneration for all enabled courses, or one course.',
     { course: { type: 'string', description: 'Course name; omit to rebuild all enabled courses' } },
@@ -629,15 +494,6 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     'Submit content feedback of a course note: reads the note「内容反馈」section and marks the node flagged + regeneration queue.',
     { path: { type: 'string', required: true, description: 'Note path, vault-relative or absolute' } },
     (args: { path: string }) => run('learnhub_feedback', () => engine.submitFeedback(VAULT, CENTER_REL, args.path)))
-  tool('learnhub_writeback',
-    "D15: write a 1-4 rating into the rating line of today's worksheet for one node. This is the only scheduling file write allowed outside the engine.",
-    {
-      course: { type: 'string', required: true, description: 'Course name' },
-      node: { type: 'string', required: true, description: 'Node name' },
-      rating: { type: 'number', required: true, description: 'Rating 1-4' },
-    },
-    async (args: { course: string; node: string; rating: number }) =>
-      run('learnhub_writeback', async () => JSON.stringify(await writeBack(args.course, args.node, args.rating))))
   tool('learnhub_note_resolve',
     'Resolve a course note: read its frontmatter node and map the path to its enabled course via 课程注册表.yaml.',
     { path: { type: 'string', required: true, description: 'Note path, vault-relative or absolute' } },
@@ -676,15 +532,6 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
         }
         return JSON.stringify(await engine.graphApply(args.kind === 'edit' ? 'edit' : 'gen', args.id))
       }))
-  tool('learnhub_exercises_gen',
-    'Generate exercises for a course node: validates the ExerciseSet YAML (answer presence, choice letters, uses in graph) then writes into the note practice section.',
-    {
-      course: { type: 'string', required: true, description: 'Course name' },
-      node: { type: 'string', required: true, description: 'Node name (must match the node field inside the YAML)' },
-      yaml: { type: 'string', required: true, description: 'ExerciseSet YAML text (node/mode/exercises[q,answer,check,difficulty,uses])' },
-    },
-    (args: { course: string; node: string; yaml: string }) => run('learnhub_exercises_gen', async () =>
-      JSON.stringify(await engine.genExercises(args.course, args.node, args.yaml))))
   tool('learnhub_generate',
     'Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/提示词/课程生成.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics).',
     {
@@ -710,7 +557,7 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     (args: { course: string; node: string; yaml: string }) => run('learnhub_question_save', async () =>
       JSON.stringify(await engine.questionSave(args.course, args.node, args.yaml))))
   tool('learnhub_question_answer',
-    'Answer one bank question (allo grading): auto-judged 1.0/0.0 (reflection graded by AI against its rubric), records practice evidence (JSONL + counters/EMA). Scheduling is NOT touched here — rate via learnhub_grade or the worksheet writeback.',
+    'Answer one bank question (flashcard model): auto-judged 1.0/0.0 (reflection graded by AI against its rubric); the result drives THAT question\'s FSRS schedule (correct=Good, wrong=Again) and the node mastery aggregates per-question stats.',
     {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name' },
@@ -719,20 +566,6 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     },
     (args: { course: string; node: string; qid: string; answer: string }) => run('learnhub_question_answer', async () =>
       JSON.stringify(await engine.questionAnswer(prompt => llmComplete(ctx, prompt), args.course, args.node, args.qid, args.answer))))
-  tool('learnhub_record_attempt',
-    'Record one already-graded attempt for a note exercise (practice JSONL + frontmatter counters/EMA). Use after you judged an "ai" or "human" exercise yourself; learnhub_check with judge=ai/human does NOT record.',
-    {
-      course: { type: 'string', required: true, description: 'Course name' },
-      node: { type: 'string', required: true, description: 'Node name' },
-      ex: { type: 'number', required: true, description: 'Exercise number, e.g. 1' },
-      answer: { type: 'string', required: true, description: 'User answer' },
-      judge: { type: 'string', required: true, description: 'Judge kind: sympy | choice | ai | human' },
-      correct: { type: 'boolean', required: true, description: 'Grading result (decide it yourself for ai/human exercises)' },
-      feedback: { type: 'string', description: 'Optional grading feedback' },
-    },
-    (args: { course: string; node: string; ex: number; answer: string; judge: string; correct: boolean; feedback?: string }) =>
-      run('learnhub_record_attempt', async () =>
-        JSON.stringify(await engine.recordAttempt(args.course, args.node, args.ex, args.answer, args.judge, args.correct, args.feedback))))
 
   // —— 客户端面板 HTTP 路由 ——
   ctx.effect(
@@ -783,7 +616,7 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     'learnhub: panel SPA (web/dist)',
   )
 
-  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 21 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`)
+  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 15 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`)
 
   // 加载自检：不依赖模型直接跑一次 status，验证引擎通路。
   void engine.statusJson()

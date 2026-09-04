@@ -43,8 +43,25 @@ const bank = await e.questions('MathForGames', n0)
 console.log('visible:', bank.questions.length, 'kinds:', bank.questions.map(q => q.kind).join(','))
 const r2 = await e.questionGenerate('MathForGames', n0, 6, async () => yaml)
 console.log('second run ids:', JSON.stringify(r2))
-// 作答闭环：对 q1 判卷
-const ans = await e.questionAnswer(async () => { throw new Error('no llm') }, 'MathForGames', n0, 'q1', 'A')
-console.log('answer q1 correct:', ans.correct)
+// 作答闭环：对 q1 判卷 + 题目级 FSRS 推进 + 统计写回
+const ans = await e.questionAnswer(async () => { throw new Error('no llm') }, 'MathForGames', n0, 'q1', 'B')
+console.log('answer q1 correct:', ans.correct, '| due:', ans.due, '| mastery:', ans.mastery)
+const bankAfter = await e.bank.load(e.paths.courseRoot(e.paths.courseRoot ? (await e.registry.resolve('MathForGames')).root : ''), n0)
+const q1 = bankAfter.questions.find(q => q.id === 'q1')
+console.log('q1 fsrs reps:', q1.fsrs?.reps, '| stats:', JSON.stringify(q1.stats))
+// 完成确认：未作答题初始化 FSRS + stage→review
+const done = await e.nodeComplete('MathForGames', n0)
+console.log('complete:', JSON.stringify(done))
+const { graph, state } = await e.loadView(await e.registry.resolve('MathForGames'))
+console.log('stage after complete:', state[n0].stage)
+// 跳过：另一节点 stage→skipped；doneSet 视同通过
+const n1 = c0.regions[0].blocks[0].nodes[1].node
+const skip = await e.nodeSkip('MathForGames', n1, true)
+console.log('skip:', JSON.stringify(skip))
+const { state: s2 } = await e.loadView(await e.registry.resolve('MathForGames'))
+console.log('stage after skip:', s2[n1].stage)
+// 聚合：nodeMastery = Σcorrect/Σattempts
+const mastery = ans.mastery
+if (!(mastery >= 0 && mastery <= 1)) throw new Error('mastery out of range')
 rmSync(scratch, { recursive: true, force: true })
 console.log('QUIZ PIPELINE OK')

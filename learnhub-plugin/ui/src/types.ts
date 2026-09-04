@@ -1,15 +1,15 @@
 /** 引擎 API 返回形状（与 learnhub-plugin 引擎输出一一对应）。 */
 
-export type Stage = 'unseen' | 'ready' | 'learning' | 'review' | 'mastered'
+export type Stage = 'unseen' | 'ready' | 'learning' | 'review' | 'mastered' | 'skipped'
 export type ContentStatus = 'draft' | 'reviewed' | 'flagged'
 
 export interface StatusCourse {
   id: string
   name: string
   total: number
-  counts: { unseen: number; ready: number; learning: number; review: number; mastered: number }
+  counts: { unseen: number; ready: number; learning: number; review: number; mastered: number; skipped: number }
   due_today: number
-  overdue: string[]
+  overdue: Array<{ node: string; since: string; count: number; path: string | null }>
   ready: Array<{ node: string; path: string | null }>
   gated: Array<{ node: string; path: string | null }>
   blocked: Record<string, string[]>
@@ -51,7 +51,7 @@ export interface GraphDoc {
   edges: Array<{ data: GraphEdgeData }>
 }
 
-export type RecEventType = 'new' | 'ready' | 'review' | 'overdue' | 'review_due' | string
+export type RecEventType = 'new' | 'ready' | 'review' | 'overdue' | 'learning' | string
 export interface RecEvent {
   type: RecEventType
   course: string
@@ -63,9 +63,9 @@ export interface RecEvent {
 }
 export interface RecommendDoc { date: string; events: RecEvent[] }
 
-export type QuestionKind = 'single_choice' | 'multi_choice' | 'fill_in_blank' | 'true_false'
+export type QuestionKind = 'single_choice' | 'fill_in_blank' | 'true_false' | 'reflection'
 
-/** 作答列表条目（不含答案）。 */
+/** 作答列表条目（不含答案；带刷卡调度状态）。 */
 export interface QuestionItem {
   id: string
   kind: QuestionKind
@@ -73,6 +73,10 @@ export interface QuestionItem {
   no: number
   difficulty: number
   options?: string[]
+  /** 题目级 FSRS 下次到期日（未进入调度的题 = null）。 */
+  due: string | null
+  attempts: number
+  lastCorrect: boolean | null
 }
 
 export interface BankEntry {
@@ -112,20 +116,15 @@ export interface GenJobItem {
   message?: string
 }
 
-export interface CheckinDoc { checked: boolean; journal: number; practice: number; total: number }
-export interface CalendarDoc {
-  year: number
-  month: number | null
-  days: Array<{ date: string; journal: number; practice: number; total: number }>
-}
-
 export interface QueueItem { course: string; node: string; kind: string; reason: string; priority: string }
 export interface DoctorDoc { problems: Array<{ level: string; message: string }> }
 
-/** 作答判卷结果（question-answer / exercises 判卷共用）。 */
+/** 作答判卷结果（question-answer；含该题新到期日与节点聚合掌握度）。 */
 export interface AnswerResult {
   correct?: boolean | null
   judge: string
   feedback?: string
   message?: string
+  due?: string
+  mastery?: number
 }

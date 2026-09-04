@@ -46,18 +46,6 @@ export class Registry {
     return (await this.load()).filter(c => c.enabled !== false)
   }
 
-  /** 设置课程标签（整体替换；空数组移除字段，保持注册表干净）。 */
-  async setTags(courseKey: string, tags: string[]): Promise<string[]> {
-    const courses = await this.load()
-    const hit = courses.find(c => courseKey === c.name || courseKey === c.id)
-    if (!hit) throw new Error(`[learnhub] 注册表中没有课程「${courseKey}」。`)
-    const clean = [...new Set(tags.map(t => t.trim()).filter(Boolean))]
-    if (clean.length) hit.tags = clean
-    else delete hit.tags
-    await this.save(courses)
-    return clean
-  }
-
   /** CLI 课程选择语义：显式指定 → 精确匹配；未指定 → 唯一启用课程。 */
   async resolve(key?: string): Promise<CourseEntry> {
     if (key) {

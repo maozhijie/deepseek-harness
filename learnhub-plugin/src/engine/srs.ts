@@ -114,6 +114,18 @@ export function stageAfter(newFs: FsrsBlock, rating: number, firstLearn: boolean
   return 'review'
 }
 
+/** 题目级（刷卡模型）一次评分 → 新 fsrs 块。题卡没有节点 stage，只有 fsrs 块本身。 */
+export function applyRatingBlock(
+  fsOld: FsrsBlock | null, ratingNum: number, today: string, sched: FSRS,
+): { fs: FsrsBlock; kind: 'learn' | 'review' | 'relearn' } {
+  const pseudo = {
+    node: '', stage: fsOld?.reps ? 'review' : 'ready', fsrs: fsOld, mastery: 0,
+    content: { version: 0, generated_at: null, status: 'draft' }, practice: { attempts: 0, correct: 0 },
+  } as unknown as Fm
+  const { fs, meta } = applyRating(pseudo, ratingNum, today, sched)
+  return { fs, kind: meta.kind }
+}
+
 /** 派生展示值 mastery = f(S, 近期练习 EMA)；调度不读它。 */
 export function masteryValue(fs: FsrsBlock | null, practice: { attempts: number; correct: number }, ema: number | undefined): number {
   if (!fs || !fs.reps) return 0

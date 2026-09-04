@@ -20,7 +20,6 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
   const [answer, setAnswer] = useState('')
   const [explanation, setExplanation] = useState('')
   const [difficulty, setDifficulty] = useState(1)
-  const [tags, setTags] = useState('')
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
@@ -34,8 +33,6 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
         question.answer = answer.trim()
         question.options = options.split('\n').map(s => s.trim()).filter(Boolean)
       }
-      const tg = tags.split(/[,，]/).map(s => s.trim()).filter(Boolean)
-      if (tg.length) question.tags = tg
       const r = await api.questionAdd(props.course, node, question)
       Message.success(`已添加 ${r.id}（题库共 ${r.count} 题）`)
       props.onDone()
@@ -70,7 +67,6 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
         <Select value={difficulty} onChange={setDifficulty} style={{ width: 90 }}>
           {[1, 2, 3].map(d => <Select.Option key={d} value={d}>{d}</Select.Option>)}
         </Select>
-        <Input value={tags} onChange={setTags} placeholder='标签，逗号分隔' style={{ width: 200 }} />
       </Space>
       <Button type='primary' loading={busy} onClick={() => void submit()}>添加（过 schema 门禁后落盘）</Button>
     </Space>
@@ -103,7 +99,7 @@ export default function BankPage({ frame }: { frame: AppFrame }) {
 
   const visible = (entries ?? []).filter(e =>
     (showArchived || !e.archived)
-    && (!search || e.q.includes(search) || e.node.includes(search) || e.tags.some(t => t.includes(search))))
+    && (!search || e.q.includes(search) || e.node.includes(search)))
 
   const doArchive = async (e: BankEntry, archived: boolean) => {
     try {
@@ -120,7 +116,7 @@ export default function BankPage({ frame }: { frame: AppFrame }) {
         <Select value={filterCourse} onChange={v => setFilterCourse(v)} placeholder='全部课程' style={{ width: 180 }} allowClear>
           {frame.tree?.courses.map(c => <Select.Option key={c.name} value={c.name}>{c.name}</Select.Option>)}
         </Select>
-        <Input value={search} onChange={setSearch} placeholder='搜题干/节点/标签' style={{ width: 220 }} allowClear />
+        <Input value={search} onChange={setSearch} placeholder='搜题干/节点' style={{ width: 220 }} allowClear />
         <Space size={6}><Text>显示已归档</Text><Switch checked={showArchived} onChange={setShowArchived} /></Space>
         <Button type='primary' size='small' style={{ marginLeft: 'auto' }}
           disabled={!filterCourse} onClick={() => setCreating(true)}>自建题</Button>
@@ -136,9 +132,6 @@ export default function BankPage({ frame }: { frame: AppFrame }) {
             { title: '#', dataIndex: 'qid', width: 54 },
             { title: '题型', width: 70, render: (_, e) => <Tag size='small'>{KIND_LABEL[e.kind] ?? e.kind}</Tag> },
             { title: '题干', dataIndex: 'q', ellipsis: true },
-            { title: '标签', width: 140, render: (_, e) => (
-              <Space size={4} wrap>{e.tags.map(t => <Tag key={t} size='small' color='purple'>{t}</Tag>)}</Space>
-            ) },
             { title: '状态', width: 80, render: (_, e) => e.archived
               ? <Tag size='small' color='gray'>已归档</Tag>
               : <Tag size='small' color='green'>在库</Tag> },
@@ -167,13 +160,12 @@ export default function BankPage({ frame }: { frame: AppFrame }) {
   )
 }
 
-/** 编辑抽屉：题干/答案/解析/难度/标签。 */
+/** 编辑抽屉：题干/答案/解析/难度。 */
 function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSaved: () => void }) {
   const [q, setQ] = useState('')
   const [answer, setAnswer] = useState('')
   const [explanation, setExplanation] = useState('')
   const [difficulty, setDifficulty] = useState(1)
-  const [tags, setTags] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -183,7 +175,6 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
       setAnswer('')
       setExplanation('')
       setDifficulty(e.difficulty)
-      setTags(e.tags.join(','))
     }
   }, [props.entry])
 
@@ -199,7 +190,6 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
         else if (props.entry.kind === 'fill_in_blank') patch.answer = answer.split('|').map(s => s.trim()).filter(Boolean)
         else patch.answer = answer.trim()
       }
-      patch.tags = tags.split(/[,，]/).map(s => s.trim()).filter(Boolean)
       await api.questionUpdate(props.entry.course, props.entry.node, props.entry.qid, patch)
       Message.success('已保存（validateBank 门禁通过）')
       props.onSaved()
@@ -226,7 +216,6 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
           <Input.TextArea value={q} onChange={setQ} autoSize={{ minRows: 2, maxRows: 6 }} />
           <Input value={answer} onChange={setAnswer} placeholder='答案（留空则不修改）' />
           <Input value={explanation} onChange={setExplanation} placeholder='解析（可选，留空不修改）' />
-          <Input value={tags} onChange={setTags} placeholder='标签，逗号分隔' />
           <Button type='primary' loading={busy} onClick={() => void save()}>保存</Button>
         </Space>
       )}

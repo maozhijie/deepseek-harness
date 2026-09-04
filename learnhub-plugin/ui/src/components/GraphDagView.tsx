@@ -34,9 +34,10 @@ const STAGE_COLOR: Record<Stage, string> = {
   learning: 'var(--color-primary-6, #165dff)',
   review: 'var(--color-success-6, #00b42a)',
   mastered: 'var(--color-success-6, #00b42a)',
+  skipped: 'var(--color-purple-6, #722ed1)',
 }
 const STAGE_LABEL: Record<Stage, string> = {
-  unseen: '未学', ready: '就绪', learning: '进行中', review: '复习', mastered: '已掌握',
+  unseen: '未学', ready: '就绪', learning: '进行中', review: '复习', mastered: '已掌握', skipped: '已跳过',
 }
 
 interface DagNodeData extends Record<string, unknown> {

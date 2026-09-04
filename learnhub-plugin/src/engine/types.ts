@@ -5,9 +5,9 @@
  * 事实源；state/ 下 JSONL/JSON 只承载追加型流水（日志/作答）与人审产物（提案/快照）。
  */
 
-/** 阶段机（courses.STAGES）。 */
-export type Stage = 'unseen' | 'ready' | 'learning' | 'review' | 'mastered'
-export const STAGES: Stage[] = ['unseen', 'ready', 'learning', 'review', 'mastered']
+/** 阶段机（courses.STAGES）。skipped = 用户已有基础跳过（调度视同已通过）。 */
+export type Stage = 'unseen' | 'ready' | 'learning' | 'review' | 'mastered' | 'skipped'
+export const STAGES: Stage[] = ['unseen', 'ready', 'learning', 'review', 'mastered', 'skipped']
 
 /** 内容状态（courses.CONTENT_STATUS）。 */
 export type ContentStatus = 'draft' | 'reviewed' | 'flagged'

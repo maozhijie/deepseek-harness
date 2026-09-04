@@ -21,6 +21,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { YAML } from './yaml.ts'
 import { normChoice } from './grading.ts'
 import type { AlloKind } from './grading.ts'
+import type { FsrsBlock } from './types.ts'
 import type { Paths } from './paths.ts'
 import { safeFilename } from './paths.ts'
 
@@ -35,6 +36,10 @@ export interface BankQuestion {
   uses?: string[]
   tags?: string[]
   archived?: boolean
+  /** 题目级 FSRS 调度（刷卡模型：每题一张卡，作答对错驱动推进）。 */
+  fsrs?: FsrsBlock
+  /** 作答统计（节点掌握度 = 各题该数据的汇总）。 */
+  stats?: { attempts: number; correct: number; last?: string }
 }
 
 export interface BankDoc { node: string; questions: BankQuestion[] }
@@ -103,6 +108,9 @@ export function validateBank(doc: unknown, expectedNode?: string): { errors?: st
         ...(Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {}),
         ...(Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {}),
         ...(e.archived === true ? { archived: true } : {}),
+        // 调度/统计块由作答侧写入，schema 只透传不做内部校验
+        ...(e.fsrs && typeof e.fsrs === 'object' ? { fsrs: e.fsrs as FsrsBlock } : {}),
+        ...(e.stats && typeof e.stats === 'object' ? { stats: e.stats as BankQuestion['stats'] } : {}),
       })
     })
   }

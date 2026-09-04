@@ -7865,14 +7865,14 @@ var init_notes = __esm({
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync as existsSync7 } from "node:fs";
-import { readFile as readFile11, writeFile as writeFile9, appendFile as appendFile2, mkdir as mkdir10 } from "node:fs/promises";
+import { readFile as readFile10, appendFile as appendFile2, mkdir as mkdir9 } from "node:fs/promises";
 import { join as join3, resolve as resolvePath, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/engine/index.ts
 init_paths();
 import { existsSync as existsSync6 } from "node:fs";
-import { mkdir as mkdir9, readdir as readdir3, readFile as readFile10, rename as rename3 } from "node:fs/promises";
+import { mkdir as mkdir8, readdir as readdir3, readFile as readFile9, rename as rename3 } from "node:fs/promises";
 
 // src/engine/registry.ts
 init_yaml();
@@ -7908,17 +7908,6 @@ var Registry = class {
   /** 全部启用中的课程（保序）。 */
   async enabled() {
     return (await this.load()).filter((c) => c.enabled !== false);
-  }
-  /** 设置课程标签（整体替换；空数组移除字段，保持注册表干净）。 */
-  async setTags(courseKey, tags) {
-    const courses = await this.load();
-    const hit = courses.find((c) => courseKey === c.name || courseKey === c.id);
-    if (!hit) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseKey}\u300D\u3002`);
-    const clean = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
-    if (clean.length) hit.tags = clean;
-    else delete hit.tags;
-    await this.save(courses);
-    return clean;
   }
   /** CLI 课程选择语义：显式指定 → 精确匹配；未指定 → 唯一启用课程。 */
   async resolve(key) {
@@ -10102,7 +10091,6 @@ init_dates();
 
 // src/engine/params.ts
 var DESIRED_RETENTION = 0.9;
-var S_MASTER = 30;
 
 // src/engine/srs.ts
 var RATING_BY_NUM = {
@@ -10183,30 +10171,24 @@ function applyRating(fm, ratingNum, today, sched) {
   }
   return { fs, meta: { kind, elapsed_days: elapsed } };
 }
-function stageAfter(newFs, rating, firstLearn) {
-  const s = newFs.stability;
-  if (firstLearn) return rating >= 3 ? "review" : "learning";
-  if (s >= S_MASTER) return "mastered";
-  return "review";
-}
-function masteryValue(fs, practice, ema) {
-  if (!fs || !fs.reps) return 0;
-  const sComp = Math.min(1, fs.stability / (S_MASTER * 2));
-  if (practice.attempts >= 1 && ema && ema > 0) {
-    return Math.round((0.7 * sComp + 0.3 * ema) * 100) / 100;
-  }
-  if (practice.attempts >= 3) {
-    const acc = practice.correct / practice.attempts;
-    return Math.round((0.7 * sComp + 0.3 * acc) * 100) / 100;
-  }
-  return Math.round(sComp * 100) / 100;
+function applyRatingBlock(fsOld, ratingNum, today, sched) {
+  const pseudo = {
+    node: "",
+    stage: fsOld?.reps ? "review" : "ready",
+    fsrs: fsOld,
+    mastery: 0,
+    content: { version: 0, generated_at: null, status: "draft" },
+    practice: { attempts: 0, correct: 0 }
+  };
+  const { fs, meta } = applyRating(pseudo, ratingNum, today, sched);
+  return { fs, kind: meta.kind };
 }
 
 // src/engine/audit.ts
 init_notes();
 
 // src/engine/types.ts
-var STAGES = ["unseen", "ready", "learning", "review", "mastered"];
+var STAGES = ["unseen", "ready", "learning", "review", "mastered", "skipped"];
 
 // src/engine/audit.ts
 init_dates();
@@ -10466,129 +10448,10 @@ async function analyzeGraph(courseName, graph, state, store) {
 }
 
 // src/engine/content.ts
-init_yaml();
 init_dates();
 init_notes();
 import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5 } from "node:fs/promises";
 import { existsSync as existsSync2 } from "node:fs";
-
-// src/engine/grading.ts
-function normAnswer(s) {
-  return String(s).trim().replace(/\s+/g, "");
-}
-function numericOf(s) {
-  const t = normAnswer(s);
-  if (!t) return null;
-  const n = Number(t);
-  if (Number.isFinite(n)) return n;
-  const frac = t.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/);
-  if (frac && Number(frac[2]) !== 0) return Number(frac[1]) / Number(frac[2]);
-  const pct = t.match(/^(-?\d+(?:\.\d+)?)%$/);
-  if (pct) return Number(pct[1]) / 100;
-  return null;
-}
-function answersEqual(user, expected, tol) {
-  const u = normAnswer(user);
-  const e = normAnswer(expected);
-  if (!u) return false;
-  if (u === e) return true;
-  if (tol !== void 0) {
-    const nu = numericOf(u);
-    const ne = numericOf(e);
-    if (nu !== null && ne !== null && Math.abs(nu - ne) <= tol) return true;
-  }
-  if (e.includes(",") || e.includes("\uFF0C")) {
-    const us = new Set(u.split(/[,，]/).map(normAnswer).filter(Boolean));
-    const es = new Set(e.split(/[,，]/).map(normAnswer).filter(Boolean));
-    if (us.size && us.size === es.size && [...us].every((x) => es.has(x))) return true;
-  }
-  return false;
-}
-function normChoice(s) {
-  let t = normAnswer(s).toUpperCase();
-  for (const pre of ["\u9009\u9879", "\u7B54\u6848", "\u9009"]) {
-    if (t.startsWith(pre)) t = t.slice(pre.length);
-  }
-  t = t.replace(/[。．.]+$/, "");
-  const m = t.match(/[A-Z]/);
-  return m ? m[0] : t;
-}
-function choiceAnswerOk(user, expected) {
-  return Boolean(normAnswer(user)) && normChoice(user) === normChoice(expected);
-}
-var PASS_SCORE = 0.6;
-function evaluateAllo(q, response) {
-  let correct = false;
-  const explanation = q.explanation || "Try again and retrieve the governing concept before answering.";
-  switch (q.kind) {
-    case "single_choice":
-      correct = typeof response === "string" && normChoice(response) === normChoice(String(q.answer));
-      break;
-    case "true_false":
-      correct = normalizeBool(response) === normalizeBool(q.answer);
-      break;
-    case "fill_in_blank": {
-      const s = typeof response === "string" ? response.trim() : "";
-      if (!s) throw new Error("fill_in_blank \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
-      correct = Array.isArray(q.answer) && q.answer.some((c) => typeof c === "string" && c.trim().toLowerCase() === s.toLowerCase());
-      break;
-    }
-    case "reflection": {
-      const s = typeof response === "string" ? response.trim() : "";
-      if (!s) throw new Error("reflection \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
-      correct = true;
-      break;
-    }
-  }
-  const score = correct ? 1 : 0;
-  const feedback = correct ? q.explanation || "" : explanation;
-  return { score, feedback, correct };
-}
-function normalizeBool(v) {
-  if (typeof v === "boolean") return v;
-  const s = String(v ?? "").trim().toLowerCase();
-  return s === "true" || s === "\u5BF9" || s === "\u6B63\u786E" || s === "\u662F" || s === "\u221A" || s === "t" || s === "yes";
-}
-var REFLECTION_GRADING_SYSTEM = `You are a strict but encouraging learning coach grading a learner's answer for a course exercise.
-
-Score the answer from 0.0 to 1.0 (0.6 is passing):
-- Correctness: does the answer align with the concepts this exercise targets?
-- Completeness: does it cover the key points of those concepts?
-
-Reply with ONLY one JSON object matching this shape:
-{
-  "score": 0.75,
-  "feedback": "markdown text"
-}
-Rules:
-- score must be a number between 0.0 and 1.0.
-- feedback must be Markdown with two parts: (1) an evaluation of the answer, (2) concrete improvement suggestions.
-- Write the feedback in the same language as the learner's answer.
-- Output JSON only, without Markdown fences or commentary.`;
-function parseReflectionGrading(raw) {
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("unparseable reflection grading reply");
-  const doc = JSON.parse(m[0].replace(/,\s*([}\]])/g, "$1"));
-  if (typeof doc.score !== "number" || typeof doc.feedback !== "string") {
-    throw new Error("reflection grading reply missing score/feedback");
-  }
-  return { score: Math.min(1, Math.max(0, doc.score)), feedback: doc.feedback };
-}
-function nextEma(current, score) {
-  const prev = current && current > 0 ? current : null;
-  const next = prev === null ? score : prev * 0.7 + score * 0.3;
-  return Math.round(Math.min(1, Math.max(0, next)) * 1e3) / 1e3;
-}
-function applyPracticeEvidence(fm, score) {
-  const practice = {
-    attempts: fm.practice.attempts + 1,
-    correct: fm.practice.correct + (score >= PASS_SCORE ? 1 : 0)
-  };
-  const practice_ema = nextEma(fm.practice_ema, score);
-  return { ...fm, practice, practice_ema };
-}
-
-// src/engine/content.ts
 var QUEUE_GENERATE = "\u751F\u6210";
 var QUEUE_REGEN = "\u91CD\u751F\u6210";
 var Content = class _Content {
@@ -10729,22 +10592,6 @@ var Content = class _Content {
 ## \u8F93\u51FA
 
 \u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
-`,
-    AI\u5224\u5377: `# AI \u5224\u5377\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u9898\u76EE/\u53C2\u8003\u7B54\u6848/\u5B66\u751F\u4F5C\u7B54\u7531\u7CFB\u7EDF\u62FC\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
-
-\u4F60\u662F\u4E25\u683C\u7684\u9605\u5377\u8001\u5E08\u3002\u6839\u636E\u9898\u76EE\u3001\u8BC4\u5206\u8981\u70B9\u4E0E\u5B66\u751F\u4F5C\u7B54\uFF0C\u7ED9\u51FA\u8BC4\u5224\u3002
-
-## \u8BC4\u5206\u6807\u51C6
-
-- \u6838\u5FC3\u7ED3\u8BBA\u6B63\u786E\u4E14\u5173\u952E\u6B65\u9AA4/\u7406\u7531\u5230\u4F4D\uFF1Ascore \u2265 0.8\uFF08\u5224\u5BF9\uFF09\uFF1B
-- \u65B9\u5411\u5BF9\u4F46\u6709\u7F3A\u6F0F\u6216\u5C0F\u9519\uFF1Ascore 0.5\u20130.79\uFF08\u534A\u5BF9\uFF09\uFF1B
-- \u7ED3\u8BBA\u9519\u8BEF\u6216\u672A\u4F5C\u7B54\u5230\u70B9\uFF1Ascore < 0.5\uFF08\u5224\u9519\uFF09\u3002
-
-## \u8F93\u51FA\u683C\u5F0F\uFF08\u53EA\u8F93\u51FA\u4E00\u4E2A JSON\uFF0C\u4E0D\u8981\u4EFB\u4F55\u5176\u4ED6\u6587\u5B57\uFF09
-
-\`\`\`json
-{"score": 0-1\u5C0F\u6570, "verdict": "\u5BF9|\u534A\u5BF9|\u9519", "feedback": "\u9488\u5BF9\u4F5C\u7B54\u7684\u5177\u4F53\u70B9\u8BC4", "suggestions": "\u4E0B\u4E00\u6B65\u600E\u4E48\u6539\u8FDB"}
-\`\`\`
 `,
     \u9898\u76EE\u751F\u6210: `# \u9898\u76EE\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u8282\u70B9\u6B63\u6587\u7531\u7CFB\u7EDF\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
 
@@ -11024,68 +10871,6 @@ questions:
         exercises
       }
     };
-  }
-  /** 题组过门禁后写入练习区。返回结果对象；门禁失败抛错（错误行已拼入）。 */
-  async genExercises(root, graph, node, yamlText, fmOf, journal, expectedNode) {
-    const doc = YAML.parse(yamlText);
-    const v = _Content.validateExerciseSet(doc);
-    if (!v.ok) throw new Error(`[gen-exercises] schema \u6821\u9A8C\u5931\u8D25\uFF0C\u9898\u7EC4\u672A\u5199\u5165\u3002
-${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
-    const spec = v.spec;
-    if (expectedNode && expectedNode !== spec.node) {
-      throw new Error(`[gen-exercises] \u547D\u4EE4\u884C\u8282\u70B9\u300C${expectedNode}\u300D\u4E0E\u9898\u7EC4\u6587\u4EF6\u5185 node\u300C${spec.node}\u300D\u4E0D\u4E00\u81F4\u3002`);
-    }
-    if (!graph.nset.has(spec.node)) throw new Error(`[gen-exercises] \u8282\u70B9\u300C${spec.node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
-    const errors = [];
-    spec.exercises.forEach((e, i) => {
-      for (const u of e.uses ?? []) {
-        if (!graph.nset.has(u)) errors.push(`\u7B2C${i + 1}\u9898 uses \u542B\u56FE\u5916\u8282\u70B9: ${u}`);
-      }
-      if (e.check === "choice") {
-        const letters = (e.options ?? []).map((_, j) => String.fromCharCode(65 + j));
-        if (!e.options?.length || !letters.includes(normChoice(e.answer))) {
-          errors.push(`\u7B2C${i + 1}\u9898\uFF08choice\uFF09answer \u5FC5\u987B\u662F\u5408\u6CD5\u9009\u9879\u5B57\u6BCD\uFF08\u9009\u9879 ${e.options?.length ?? 0} \u4E2A\uFF09`);
-        }
-      }
-    });
-    if (errors.length) throw new Error(`[gen-exercises] \u95E8\u7981\u672A\u8FC7\uFF0C\u9898\u7EC4\u672A\u5199\u5165\uFF08\u4FEE\u6B63\u540E\u91CD\u63D0\uFF09\u3002
-${errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
-    const [, regionName] = graph.blockOf[spec.node];
-    const path = this.paths.courseNotePath(root, regionName, spec.node);
-    const { fm, body } = await loadNote(path);
-    if (!fm) throw new Error(`[gen-exercises] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF08\u5148 content apply \u6B63\u6587\uFF09: ${spec.node}`);
-    let startNo = 1;
-    const secMatch = body.match(/## 练习\s*\n([\s\S]*?)(?=\n## |$)/);
-    if (spec.mode === "append" && secMatch) startNo = _Content.practiceMeta(secMatch[1]).length + 1;
-    const lines = spec.exercises.map((e, i) => this.exerciseMetaLine(startNo + i, e));
-    let section = lines.join("\n") + "\n";
-    if (spec.mode === "append" && secMatch) section = secMatch[1].replace(/\n+$/, "") + "\n" + section;
-    const newBody = this.replaceExerciseSection(body, section);
-    await saveNote(path, fm, newBody);
-    await journal({
-      course: "",
-      node: spec.node,
-      rating: null,
-      kind: "exercises_gen",
-      elapsed_days: 0,
-      detail: `${spec.mode} \u9898\u7EC4 ${spec.exercises.length} \u9053\uFF08ex${startNo}\u2013ex${startNo + spec.exercises.length - 1}\uFF09`
-    });
-    return { node: spec.node, mode: spec.mode, count: spec.exercises.length, range: [startNo, startNo + spec.exercises.length - 1], path };
-  }
-  /** 单题 → 元数据注释行 + 题干行。 */
-  exerciseMetaLine(i, e) {
-    const parts = [`answer: ${e.answer}`, `check: ${e.check}`, `difficulty: ${e.difficulty ?? 1}`, `uses: [${(e.uses ?? []).join(", ")}]`];
-    if (e.check === "choice" && e.options?.length) parts.unshift(`options: ${e.options.join("\uFF1B")}`);
-    if (e.check === "sympy" && e.tol) parts.push(`tol: ${e.tol}`);
-    return `<!-- ex:${i} | ${parts.join(" | ")} -->
-${i}. ${e.q}`;
-  }
-  /** 正文的「## 练习」区替换（无该区则追加到正文末尾）。 */
-  replaceExerciseSection(body, sectionText) {
-    const nl = String.fromCharCode(10);
-    const m = body.match(/## 练习\s*\n[\s\S]*?(?=\n## |$)/);
-    if (m) return body.slice(0, m.index) + "## \u7EC3\u4E60" + nl + sectionText + body.slice(m.index + m[0].length);
-    return (body || "").replace(new RegExp(nl + "+$"), "") + nl + nl + "## \u7EC3\u4E60" + nl + sectionText;
   }
   /** 手动插队（T3）。 */
   async queueManual(root, node) {
@@ -11590,6 +11375,93 @@ function applyOpsToRegions(regions, ops) {
 init_yaml();
 import { existsSync as existsSync4 } from "node:fs";
 import { mkdir as mkdir7, readFile as readFile8, writeFile as writeFile7 } from "node:fs/promises";
+
+// src/engine/grading.ts
+function normAnswer(s) {
+  return String(s).trim().replace(/\s+/g, "");
+}
+function normChoice(s) {
+  let t = normAnswer(s).toUpperCase();
+  for (const pre of ["\u9009\u9879", "\u7B54\u6848", "\u9009"]) {
+    if (t.startsWith(pre)) t = t.slice(pre.length);
+  }
+  t = t.replace(/[。．.]+$/, "");
+  const m = t.match(/[A-Z]/);
+  return m ? m[0] : t;
+}
+var PASS_SCORE = 0.6;
+function evaluateAllo(q, response) {
+  let correct = false;
+  const explanation = q.explanation || "Try again and retrieve the governing concept before answering.";
+  switch (q.kind) {
+    case "single_choice":
+      correct = typeof response === "string" && normChoice(response) === normChoice(String(q.answer));
+      break;
+    case "true_false":
+      correct = normalizeBool(response) === normalizeBool(q.answer);
+      break;
+    case "fill_in_blank": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("fill_in_blank \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      correct = Array.isArray(q.answer) && q.answer.some((c) => typeof c === "string" && c.trim().toLowerCase() === s.toLowerCase());
+      break;
+    }
+    case "reflection": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("reflection \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      correct = true;
+      break;
+    }
+  }
+  const score = correct ? 1 : 0;
+  const feedback = correct ? q.explanation || "" : explanation;
+  return { score, feedback, correct };
+}
+function normalizeBool(v) {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "true" || s === "\u5BF9" || s === "\u6B63\u786E" || s === "\u662F" || s === "\u221A" || s === "t" || s === "yes";
+}
+var REFLECTION_GRADING_SYSTEM = `You are a strict but encouraging learning coach grading a learner's answer for a course exercise.
+
+Score the answer from 0.0 to 1.0 (0.6 is passing):
+- Correctness: does the answer align with the concepts this exercise targets?
+- Completeness: does it cover the key points of those concepts?
+
+Reply with ONLY one JSON object matching this shape:
+{
+  "score": 0.75,
+  "feedback": "markdown text"
+}
+Rules:
+- score must be a number between 0.0 and 1.0.
+- feedback must be Markdown with two parts: (1) an evaluation of the answer, (2) concrete improvement suggestions.
+- Write the feedback in the same language as the learner's answer.
+- Output JSON only, without Markdown fences or commentary.`;
+function parseReflectionGrading(raw) {
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("unparseable reflection grading reply");
+  const doc = JSON.parse(m[0].replace(/,\s*([}\]])/g, "$1"));
+  if (typeof doc.score !== "number" || typeof doc.feedback !== "string") {
+    throw new Error("reflection grading reply missing score/feedback");
+  }
+  return { score: Math.min(1, Math.max(0, doc.score)), feedback: doc.feedback };
+}
+function nextEma(current, score) {
+  const prev = current && current > 0 ? current : null;
+  const next = prev === null ? score : prev * 0.7 + score * 0.3;
+  return Math.round(Math.min(1, Math.max(0, next)) * 1e3) / 1e3;
+}
+function applyPracticeEvidence(fm, score) {
+  const practice = {
+    attempts: fm.practice.attempts + 1,
+    correct: fm.practice.correct + (score >= PASS_SCORE ? 1 : 0)
+  };
+  const practice_ema = nextEma(fm.practice_ema, score);
+  return { ...fm, practice, practice_ema };
+}
+
+// src/engine/question-bank.ts
 init_paths();
 var KINDS = ["single_choice", "true_false", "fill_in_blank", "reflection"];
 function validateBank(doc, expectedNode) {
@@ -11652,7 +11524,10 @@ function validateBank(doc, expectedNode) {
         ...e.difficulty !== void 0 && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {},
         ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {},
         ...Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {},
-        ...e.archived === true ? { archived: true } : {}
+        ...e.archived === true ? { archived: true } : {},
+        // 调度/统计块由作答侧写入，schema 只透传不做内部校验
+        ...e.fsrs && typeof e.fsrs === "object" ? { fsrs: e.fsrs } : {},
+        ...e.stats && typeof e.stats === "object" ? { stats: e.stats } : {}
       });
     });
   }
@@ -11762,11 +11637,10 @@ init_yaml();
 
 // src/engine/sessions.ts
 init_dates();
-import { readFile as readFile9, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
 import { existsSync as existsSync5 } from "node:fs";
 init_notes();
 function doneSet(graph, state) {
-  return new Set(graph.names.filter((n) => ["review", "mastered"].includes(effectiveStage(state, n))));
+  return new Set(graph.names.filter((n) => ["review", "mastered", "skipped"].includes(effectiveStage(state, n))));
 }
 function learningSet(graph, state) {
   return new Set(graph.names.filter((n) => effectiveStage(state, n) === "learning"));
@@ -11833,39 +11707,26 @@ function regionLru(graph, state) {
   });
 }
 function courseStats(graph, state, rValue, today, rGate = 0.85) {
-  const counts = { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0 };
-  const due = [];
-  const overdue = [];
+  const counts = { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0, skipped: 0 };
   const t = parseDay(today);
   for (const n of graph.names) {
-    const st = effectiveStage(state, n);
-    counts[st]++;
-    const fs = state[n]?.fsrs;
-    if (fs?.due && ["review", "mastered", "learning"].includes(st)) {
-      const d = parseDay(fs.due);
-      if (d && d <= t) {
-        const r = rValue(n);
-        (d.getTime() < t.getTime() ? overdue : due).push({ d: fs.due, n, r });
-      }
-    }
+    counts[effectiveStage(state, n)]++;
   }
+  void t;
   return {
     counts,
     ready: readySet(graph, state, rValue),
     gated: readySet(graph, state, rValue, rGate),
-    due,
-    overdue,
+    due: [],
+    overdue: [],
+    // 复习到期改由题库聚合驱动（bankDue 注入），不再读节点 frontmatter
     blocked: gateBlockers(graph, state, rValue, rGate)
   };
 }
 var Sessions = class _Sessions {
-  constructor(paths, store, registry, viewOf, settleRating, content) {
+  constructor(paths, viewOf) {
     this.paths = paths;
-    this.store = store;
-    this.registry = registry;
     this.viewOf = viewOf;
-    this.settleRating = settleRating;
-    this.content = content;
   }
   /** 当前操作的课程根目录（notePath 解析用；跨课循环内由调用方重设）。 */
   rootOf = "";
@@ -11885,20 +11746,24 @@ var Sessions = class _Sessions {
     return vp ? `[[${vp}|${n}]]` : n;
   }
   // ---- status ----
-  async statusJson(enabled, today = todayStr()) {
+  async statusJson(enabled, bankDueByCourse, today = todayStr()) {
     const courses = [];
     for (const c of enabled) {
       const { graph, state } = await this.viewOf(c);
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
       const rValue = (n) => retrievability(sched, state[n], today);
       const st = courseStats(graph, state, rValue, today);
+      const bankDue = bankDueByCourse.get(c.name) ?? [];
+      const t = parseDay(today);
+      const overdueNodes = bankDue.filter((b) => (parseDay(b.due)?.getTime() ?? 0) < t.getTime());
+      const dueNodes = bankDue.filter((b) => (parseDay(b.due)?.getTime() ?? 0) === t.getTime());
       courses.push({
         id: c.id,
         name: c.name,
         total: graph.names.length,
         counts: st.counts,
-        due_today: st.due.length,
-        overdue: st.overdue.map((o) => ({ node: o.n, since: o.d, r: Math.round(o.r * 1e3) / 1e3, path: this.notePath(c.root, graph, o.n) })),
+        due_today: dueNodes.length,
+        overdue: overdueNodes.map((o) => ({ node: o.node, since: o.due, count: o.count, path: this.notePath(c.root, graph, o.node) })),
         ready: st.ready.map((n) => ({ node: n, path: this.notePath(c.root, graph, n) })),
         gated: st.gated.map((n) => ({ node: n, path: this.notePath(c.root, graph, n) })),
         blocked: Object.fromEntries(Object.entries(st.blocked).map(([n, weak]) => [n, weak.map(([p, r]) => ({ pre: p, r: Math.round(r * 1e3) / 1e3 }))]))
@@ -11907,7 +11772,7 @@ var Sessions = class _Sessions {
     return { date: today, courses };
   }
   // ---- 动态推荐 ----
-  async recommendEvents(enabled, today, limit) {
+  async recommendEvents(enabled, bankDueByCourse, today, limit) {
     const events = [];
     const seen = /* @__PURE__ */ new Set();
     for (const c of enabled) {
@@ -11915,6 +11780,8 @@ var Sessions = class _Sessions {
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
       const rValue = (n) => retrievability(sched, state[n], today);
       const st = courseStats(graph, state, rValue, today);
+      const bankDue = bankDueByCourse.get(c.name) ?? [];
+      const t = parseDay(today);
       const add = (etype, node, score, why) => {
         if (seen.has(node)) return;
         seen.add(node);
@@ -11928,17 +11795,20 @@ var Sessions = class _Sessions {
           path: this.notePath(c.root, graph, node)
         });
       };
-      for (const o of [...st.overdue].sort((a, b) => a.d.localeCompare(b.d))) {
-        const days = daysBetween(parseDay(today), parseDay(o.d));
-        add(
-          "review",
-          o.n,
-          60 + Math.min(days, 10) * 3 + (1 - o.r) * 10,
-          `\u903E\u671F ${days} \u5929\uFF08${o.d} \u8D77\u5230\u671F\uFF09\uFF0C\u8BB0\u5FC6\u4FDD\u6301\u7387\u7EA6 ${Math.round(o.r * 100)}%`
-        );
-      }
-      for (const d0 of [...st.due].sort((a, b) => a.d.localeCompare(b.d))) {
-        add("review", d0.n, 55, `\u4ECA\u65E5\u5230\u671F\uFF0C\u8BB0\u5FC6\u4FDD\u6301\u7387\u7EA6 ${Math.round(d0.r * 100)}%`);
+      for (const b of [...bankDue].sort((a, b2) => a.due.localeCompare(b2.due))) {
+        const d = parseDay(b.due);
+        if (!d) continue;
+        if (d.getTime() < t.getTime()) {
+          const days = daysBetween(t, d);
+          add(
+            "overdue",
+            b.node,
+            60 + Math.min(days, 10) * 3 + b.count * 2,
+            `\u903E\u671F ${days} \u5929\uFF0C${b.count} \u9053\u9898\u5230\u671F`
+          );
+        } else if (d.getTime() === t.getTime()) {
+          add("review", b.node, 55, `\u4ECA\u65E5 ${b.count} \u9053\u9898\u5230\u671F`);
+        }
       }
       for (const n of graph.names.filter((x) => effectiveStage(state, x) === "learning").sort()) {
         const r = state[n] ? rValue(n) : 0.9;
@@ -11962,337 +11832,6 @@ var Sessions = class _Sessions {
     }
     events.sort((a, b) => b.score - a.score);
     return events.slice(0, limit);
-  }
-  // ---- today（跨课程统一工作单） ----
-  async buildCenterSession(enabled, minutes, today = todayStr()) {
-    const budget = minutes;
-    const entries = [];
-    for (const c of enabled) {
-      const { graph, state } = await this.viewOf(c);
-      const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
-      const rValue = (n) => retrievability(sched, state[n], today);
-      const debt = [];
-      for (const n of graph.names) {
-        const stg = effectiveStage(state, n);
-        if (!["review", "mastered", "learning"].includes(stg)) continue;
-        const fs = state[n]?.fsrs;
-        if (!fs?.due) continue;
-        const d = parseDay(fs.due);
-        const t = parseDay(today);
-        if (d && d <= t) debt.push({ r: rValue(n), n, fs });
-      }
-      debt.sort((a, b) => a.r - b.r || a.n.localeCompare(b.n));
-      const candidates = readySet(graph, state, rValue);
-      const withContent = [];
-      const pending = [];
-      for (const n of candidates) {
-        const fm = state[n];
-        const ok = fm && ["draft", "reviewed"].includes(fm.content.status) && fm.content.version > 0;
-        (ok ? withContent : pending).push(n);
-      }
-      let lastStudy = "";
-      for (const fm of Object.values(state)) {
-        if (fm.fsrs?.last_review && fm.fsrs.last_review > lastStudy) lastStudy = fm.fsrs.last_review;
-      }
-      entries.push({ course: c, graph, state, debt, withContent, pending, lastStudy });
-    }
-    const debtTotal = entries.reduce((s, e) => s + e.debt.length, 0);
-    const overload = debtTotal > 2 * 20;
-    const allReviews = entries.flatMap((e) => e.debt.map((d) => ({ ...d, course: e.course.name })));
-    allReviews.sort((a, b) => a.r - b.r || a.course.localeCompare(b.course) || a.n.localeCompare(b.n));
-    const kReview = Math.floor(budget * 0.6 / 3);
-    const reviews = allReviews.slice(0, allReviews.length ? Math.max(kReview, 1) : 0);
-    const newItems = [];
-    const remain = budget - reviews.length * 3;
-    let slots = Math.max(0, Math.floor(remain / 12));
-    const order = [...entries].sort((a, b) => a.lastStudy.localeCompare(b.lastStudy));
-    for (const e of order) {
-      if (slots <= 0) break;
-      if (!e.withContent.length) continue;
-      const picked = this.pickNew(e.graph, e.state, e.withContent, 1);
-      if (!picked.length) continue;
-      newItems.push([e.course.name, picked[0]]);
-      slots -= 1;
-    }
-    return {
-      date: today,
-      minutes,
-      budget,
-      course_order: enabled.map((c) => c.name),
-      debt_total: debtTotal,
-      overload,
-      reviews: reviews.map((r) => ({ course: r.course, node: r.n, r: r.r, stability: r.fs.stability, due: r.fs.due })),
-      new: newItems,
-      roots: Object.fromEntries(enabled.map((c) => [c.name, c.root])),
-      pending: Object.fromEntries(entries.map((e) => [e.course.name, e.pending]))
-    };
-  }
-  /** 按区 LRU 轮转选新课：优先最久未学的区，区内取最浅候选。 */
-  pickNew(graph, state, candidates, count) {
-    if (count <= 0 || !candidates.length) return [];
-    const byRegion = {};
-    for (const n of candidates) {
-      ;
-      (byRegion[graph.blockOf[n][1]] ??= []).push(n);
-    }
-    for (const items of Object.values(byRegion)) {
-      items.sort((a, b) => (graph.depth[a] ?? 0) - (graph.depth[b] ?? 0) || a.localeCompare(b));
-    }
-    const picked = [];
-    let orderRegion = regionLru(graph, state).filter((r) => r in byRegion);
-    while (picked.length < count && orderRegion.length) {
-      const exhausted = [];
-      for (const r of orderRegion) {
-        if (picked.length >= count) break;
-        picked.push(byRegion[r].shift());
-        if (!byRegion[r].length) exhausted.push(r);
-      }
-      orderRegion = orderRegion.filter((r) => !exhausted.includes(r));
-    }
-    return picked;
-  }
-  /** 跨课程统一工作单 Markdown（## [课程名] 段型，全角 ｜ 契约）。 */
-  renderSession(pack) {
-    const today = pack.date;
-    const lines = ["---", `date: ${today}`, `minutes: ${pack.minutes}`, "mode: normal", "settled: false", "---", ""];
-    lines.push(`# \u5B66\u4E60\u4F1A\u8BDD ${today}\uFF08\u9884\u7B97 ${pack.budget} \u5206\u949F \xB7 \u7EA6 ${pack.reviews.length} \u590D\u4E60 + ${pack.new.length} \u65B0\u8BFE\uFF09`);
-    lines.push("");
-    for (const cname of pack.course_order) {
-      const reviews = pack.reviews.filter((x) => x.course === cname);
-      const news = pack.new.filter(([c]) => c === cname).map(([, n]) => n);
-      const pending = pack.pending[cname] ?? [];
-      if (!reviews.length && !news.length && !pending.length) continue;
-      lines.push(`## [${cname}] \u5230\u671F\u590D\u4E60`, "");
-      if (reviews.length) {
-        for (const r of reviews) {
-          const tier = r.r >= 0.8 ? "\u5FEB\u8FC7" : r.r < 0.5 ? "\u91CD\u5B66" : "\u6B63\u5E38";
-          lines.push(`- [ ] ${this.nodeLink(pack.roots[cname] ?? "", this.graphOf(pack, cname), r.node)} \uFF5C S=${r.stability.toFixed(1)}d \uFF5C R=${Math.round(r.r * 100)}% \uFF5C ${tier} \uFF5C \u8BC4\u5206\uFF1A`);
-        }
-      } else {
-        lines.push("\uFF08\u65E0\u5230\u671F\u590D\u4E60\uFF09");
-      }
-      lines.push("");
-      if (news.length) {
-        lines.push(`## [${cname}] \u65B0\u8BFE`, "");
-        for (const n of news) lines.push(`- [ ] ${this.nodeLink(pack.roots[cname] ?? "", this.graphOf(pack, cname), n)} \uFF5C \u9996\u5B66\u8BC4\u5206\uFF1A`);
-        lines.push("");
-      }
-      if (pending.length) {
-        lines.push(`\u5185\u5BB9\u5F85\u751F\u6210\uFF08ready \u4F46\u8BFE\u7A0B\u672A\u4EA7\u51FA\uFF09\uFF1A${pending.slice(0, 10).join("\u3001")}`, "");
-      }
-    }
-    lines.push("## \u5907\u6CE8", "");
-    lines.push("- \u8BC4\u5206\u8BF4\u660E\uFF1A1=Again \u5FD8\u4E86 / 2=Hard \u8D39\u52B2 / 3=Good \u6B63\u5E38 / 4=Easy \u8F7B\u677E\u3002\u590D\u4E60 = \u4E0D\u7FFB\u5F00\u8BFE\u7A0B\u5148\u56DE\u5FC6\u8BE5\u8282\u70B9\u7684\u5B9A\u4E49\u4E0E\u6027\u8D28\uFF0C\u518D\u5BF9\u7167\u81EA\u8BC4\u3002");
-    return lines.join("\n") + "\n";
-  }
-  graphCache = /* @__PURE__ */ new Map();
-  graphOf(pack, cname) {
-    return this.graphCache.get(cname) ?? { blockOf: {}, names: [] };
-  }
-  /** 组装今日统一工作单 → 会话/YYYY-MM-DD.md；已存在且未结算时直接继续作答。 */
-  async today(enabled, minutes, today = todayStr()) {
-    const path = this.paths.sessionPath(today);
-    if (existsSync5(path)) {
-      const raw = await readFile9(path, "utf8");
-      const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-      if (m && /settled:\s*false/.test(m[1])) {
-        return { message: `[today] \u4ECA\u65E5\u5DE5\u4F5C\u5355\u5DF2\u5B58\u5728\u4E14\u672A\u7ED3\u7B97\uFF0C\u76F4\u63A5\u7EE7\u7EED\u4F5C\u7B54: ${path}` };
-      }
-    }
-    const pack = await this.buildCenterSession(enabled, minutes, today);
-    this.graphCache.clear();
-    for (const c of enabled) {
-      const { graph } = await this.viewOf(c);
-      this.graphCache.set(c.name, graph);
-    }
-    await mkdir8(this.paths.sessionDir, { recursive: true });
-    await writeFile8(path, this.renderSession(pack), "utf8");
-    return {
-      message: `[today] \u5DE5\u4F5C\u5355\u5DF2\u751F\u6210: ${path}
-  \u590D\u4E60 ${pack.reviews.length}\uFF08\u503A\u5171 ${pack.debt_total}\uFF09\uFF5C \u65B0\u8BFE ${pack.new.length} \uFF5C \u6A21\u5F0F normal`
-    };
-  }
-  // ---- settle / grade ----
-  unwrapLink(s) {
-    const m = s.trim().match(/^\[\[(.+?)(?:\|(.+?))?\]\]$/);
-    if (!m) return s.trim();
-    if (m[2]) return m[2].trim();
-    return m[1].split("/").pop().trim();
-  }
-  /** 解析统一工作单作答 → {reviews, new}，条目均带课程归属。 */
-  parseSession(text) {
-    const out = { reviews: [], new: [] };
-    let course = null;
-    let section = "";
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (line.startsWith("## ")) {
-        const m2 = line.match(/^##\s*\[(.+?)\]\s*(\S+)/);
-        course = m2 ? m2[1].trim() : null;
-        section = m2 ? m2[2] : line;
-        continue;
-      }
-      if (!section) continue;
-      const m = line.match(/^- \[[ xX]?\] (.+?) ｜ .*?评分：\s*(\d)\s*$/);
-      if (!m) continue;
-      const node = this.unwrapLink(m[1]);
-      const rating = Number(m[2]);
-      if (!(rating >= 1 && rating <= 4)) continue;
-      if (line.includes("\u9996\u5B66\u8BC4\u5206")) out.new.push([course, node, rating]);
-      else if (section.includes("\u590D\u4E60") || line.includes("S=")) out.reviews.push([course, node, rating]);
-    }
-    return out;
-  }
-  /** 结算会话：逐课 audit 门禁由 facade 预检 → 按段归属写 frontmatter/日志。 */
-  async settle(dateStr, today = todayStr()) {
-    const ds = dateStr || today;
-    const path = this.paths.sessionPath(ds);
-    if (!existsSync5(path)) return { message: `[settle] \u672A\u627E\u5230\u4F1A\u8BDD\u5DE5\u4F5C\u5355: ${path}`, code: 1 };
-    const raw = await readFile9(path, "utf8");
-    if (/^---[\s\S]*?settled:\s*true[\s\S]*?---/.test(raw)) {
-      return { message: "[settle] \u8BE5\u4F1A\u8BDD\u5DF2\u7ED3\u7B97\u8FC7\uFF08\u5E42\u7B49\u4FDD\u62A4\uFF09\uFF0C\u8DF3\u8FC7\u3002", code: 0 };
-    }
-    const parsed = this.parseSession(raw);
-    if (!parsed.reviews.length && !parsed.new.length) {
-      return { message: "[settle] \u5DE5\u4F5C\u5355\u4E2D\u6CA1\u6709\u5DF2\u8BC4\u5206\u6761\u76EE\uFF08\u5728\u6761\u76EE\u672B\u5C3E\u586B \u8BC4\u5206\uFF1A1-4\uFF09\u3002", code: 1 };
-    }
-    const names = new Set([...parsed.reviews, ...parsed.new].map(([c]) => c));
-    if (names.has(null)) {
-      const en = await this.registry.enabled();
-      if (en.length !== 1) throw new Error("[settle] \u5DE5\u4F5C\u5355\u5B58\u5728\u65E0\u8BFE\u7A0B\u5F52\u5C5E\u7684\u6761\u76EE\uFF0C\u800C\u542F\u7528\u8BFE\u7A0B\u4E0D\u6B62\u4E00\u95E8\uFF1B\u6BB5\u5934\u5FC5\u987B\u4E3A `## [\u8BFE\u7A0B\u540D] \u6BB5\u578B`\u3002");
-      names.delete(null);
-      names.add(en[0].name);
-    }
-    const views = /* @__PURE__ */ new Map();
-    for (const cname of [...names].sort()) {
-      const c = await this.registry.get(cname);
-      if (!c) return { message: `[settle] \u5DE5\u4F5C\u5355\u8BFE\u7A0B\u300C${cname}\u300D\u4E0D\u5728\u6CE8\u518C\u8868\u4E2D\u3002`, code: 1 };
-      const v = await this.viewOf(c);
-      views.set(cname, { graph: v.graph, root: c.root });
-    }
-    let nDone = 0;
-    const details = [];
-    for (const [cname, node, rating] of [...parsed.reviews, ...parsed.new]) {
-      const v = views.get(cname);
-      if (!v) continue;
-      if (!v.graph.nset.has(node)) {
-        details.push(`[settle] \u8DF3\u8FC7\u672A\u77E5\u8282\u70B9: [${cname}] ${node}`);
-        continue;
-      }
-      const { newFs, kind } = await this.settleRating(cname, v.graph, node, rating, today, ds);
-      nDone += 1;
-      details.push(`  \u2713 [${cname}] ${node} \u2190 ${rating}\uFF08${kind}\uFF0CS=${newFs.stability.toFixed(1)} \u2192 due ${newFs.due}\uFF09`);
-    }
-    const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-    const body = fmMatch ? raw.slice(fmMatch[0].length) : raw;
-    let fmRaw = fmMatch ? fmMatch[1] : "";
-    fmRaw = fmRaw ? fmRaw.replace(/settled:\s*false/, "settled: true") : "settled: true";
-    await writeFile8(path, `---
-${fmRaw}
----
-
-${body}`, "utf8");
-    return {
-      message: `[settle] \u7ED3\u7B97\u5B8C\u6210\uFF1A${nDone} \u6761\u8BC4\u5206\u5165\u5E93\uFF08${ds}\uFF09\u3002
-${details.join("\n")}`,
-      code: 0
-    };
-  }
-  /** 单条补录：节点跨课唯一直接命中（「课程/节点」消歧）。 */
-  async grade(nodeSpec, rating, enabled, today = todayStr()) {
-    if (nodeSpec.includes("/")) {
-      const [cname, node] = nodeSpec.split("/", 2);
-      const c = await this.registry.get(cname.trim());
-      if (!c) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${cname.trim()}\u300D\u3002`);
-      return this.gradeIn(c, node.trim(), rating, today);
-    }
-    const hits = [];
-    for (const c of enabled) {
-      const { graph } = await this.viewOf(c);
-      if (graph.nset.has(nodeSpec)) hits.push(c);
-    }
-    if (!hits.length) throw new Error(`[learnhub] \u542F\u7528\u8BFE\u7A0B\u4E2D\u627E\u4E0D\u5230\u8282\u70B9\u300C${nodeSpec}\u300D\u3002`);
-    if (hits.length > 1) throw new Error(`[learnhub] \u8282\u70B9\u300C${nodeSpec}\u300D\u5728\u591A\u95E8\u8BFE\u7A0B\u4E2D\u5B58\u5728\uFF0C\u8BF7\u7528\u300C\u8BFE\u7A0B/\u8282\u70B9\u300D\u6307\u5B9A\uFF1A${hits.map((h) => h.name).join("\u3001")}`);
-    return this.gradeIn(hits[0], nodeSpec, rating, today);
-  }
-  async gradeIn(c, node, rating, today) {
-    const { graph } = await this.viewOf(c);
-    if (!graph.nset.has(node)) throw new Error(`[learnhub] \u8BFE\u7A0B\u300C${c.name}\u300D\u4E2D\u6CA1\u6709\u8282\u70B9\u300C${node}\u300D\u3002`);
-    const { newFs, kind } = await this.settleRating(c.name, graph, node, rating, today, today);
-    return `[grade] [${c.name}] ${node} \u2190 ${rating}\uFF08${kind}\uFF09\uFF0C\u5DF2\u5199 frontmatter \u4E0E\u65E5\u5FD7\u3002\uFF08S=${newFs.stability.toFixed(1)} \u2192 due ${newFs.due}\uFF09`;
-  }
-  // ---- 练习判卷 ----
-  /** 课程文件练习区 → [{q, meta}]；无文件返回 null。 */
-  async exerciseItems(root, graph, node) {
-    if (!graph.blockOf[node]) return null;
-    const [, regionName] = graph.blockOf[node];
-    const path = this.paths.courseNotePath(root, regionName, node);
-    const { fm, body } = await loadNote(path);
-    if (!fm) return null;
-    const m = body.match(/## 练习\s*\n([\s\S]*?)(?=\n## |$)/);
-    if (!m) return [];
-    const metas = Content.practiceMeta(m[1]);
-    const items = [];
-    const qs = [...m[1].matchAll(/^\s*\d+\.\s*(.+)$/gm)];
-    metas.forEach((meta, i) => {
-      if (qs[i]) items.push({ q: qs[i][1].trim(), meta });
-    });
-    return items;
-  }
-  /** 练习题目列表（不含答案）。 */
-  async exercises(root, graph, node) {
-    const items = await this.exerciseItems(root, graph, node);
-    if (items === null) throw new Error(`[exercises] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728: ${node}`);
-    if (!items.length) throw new Error(`[exercises] ${node} \u6CA1\u6709\u7EC3\u4E60\u533A\uFF08\u5185\u5BB9\u672A\u751F\u6210\uFF1F\uFF09\u3002`);
-    return items.map(({ q, meta }) => ({
-      ex: meta.ex,
-      q,
-      difficulty: meta.difficulty ?? 1,
-      check: meta.check ?? "human",
-      uses: meta.uses ?? [],
-      ...meta.check === "choice" && meta.options?.length ? { options: meta.options } : {}
-    }));
-  }
-  /** 判卷入口（练习区四 check 类型；不碰调度状态）。
-   * ai 题返回评分要点不记录（由 host 调模型后走 record-attempt）。 */
-  async check(courseName, root, graph, node, exNo, answer) {
-    const items = await this.exerciseItems(root, graph, node);
-    if (items === null) throw new Error(`[check] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728: ${node}`);
-    const found = items.find((x) => x.meta.ex === exNo);
-    if (!found) throw new Error(`[check] ${node} \u6CA1\u6709 ex${exNo}\u3002`);
-    const expected = found.meta.answer ?? "";
-    const kind = found.meta.check ?? "human";
-    if (kind === "ai") return { judge: "ai", q: found.q, answer: expected };
-    if (kind === "choice") {
-      const correct2 = choiceAnswerOk(answer, expected);
-      await this.recordAttempt(courseName, root, graph, node, exNo, answer, "choice", correct2);
-      return { judge: "choice", correct: correct2, answer: expected };
-    }
-    if (kind !== "sympy") {
-      await this.recordAttempt(courseName, root, graph, node, exNo, answer, "human", null);
-      return { judge: "human", correct: null, answer: expected };
-    }
-    const correct = answersEqual(answer, expected, found.meta.tol);
-    await this.recordAttempt(courseName, root, graph, node, exNo, answer, "sympy", correct);
-    return { judge: "sympy", correct, answer: expected };
-  }
-  /** 补录一次作答：验题存在 → practice 流水 + frontmatter 计数/EMA。 */
-  async recordAttempt(courseName, root, graph, node, exNo, answer, judge, correct, feedback) {
-    const items = await this.exerciseItems(root, graph, node);
-    if (items === null) throw new Error(`[record] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728: ${node}`);
-    if (!items.some((x) => x.meta.ex === exNo)) throw new Error(`[record] ${node} \u6CA1\u6709 ex${exNo}\u3002`);
-    await this.store.appendPractice({ course: courseName, node, ex: exNo, answer, correct, judge, feedback });
-    if (correct !== null) {
-      const [, regionName] = graph.blockOf[node];
-      const path = this.paths.courseNotePath(root, regionName, node);
-      const { fm: rawFm, body } = await loadNote(path);
-      const fm = asFm(rawFm);
-      if (fm) {
-        const next = applyPracticeEvidence(fm, correct ? 1 : 0);
-        await saveNote(path, next, body);
-      }
-    }
-    return { recorded: true, judge, correct };
   }
   // ---- 课程学习（面板全链路） ----
   /** 正文 → 学习分节 [{title, md}]（_lesson_sections 同语义）。 */
@@ -12327,7 +11866,7 @@ ${details.join("\n")}`,
     }
     return sections;
   }
-  /** 单节点课程学习包：分节正文 + 练习 + 前置 + 推荐下一步。 */
+  /** 单节点课程学习包：分节正文 + 前置 + 推荐下一步。 */
   async lesson(courseName, root, graph, state, node) {
     if (!graph.nset.has(node)) throw new Error(`[lesson] \u8BFE\u7A0B\u300C${courseName}\u300D\u4E2D\u6CA1\u6709\u8282\u70B9\u300C${node}\u300D\u3002`);
     const [, regionName] = graph.blockOf[node];
@@ -12336,7 +11875,6 @@ ${details.join("\n")}`,
     const fm = asFm(rawFm);
     if (!fm) throw new Error(`[lesson] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF08\u5185\u5BB9\u672A\u751F\u6210\uFF1F\uFF09\uFF1A${node}`);
     const sections = _Sessions.lessonSections(body);
-    const exercises = await this.exercises(root, graph, node).catch(() => []);
     const sched = await getScheduler(this.paths, this.paths.courseRoot(root));
     const rValue = (n) => retrievability(sched, state[n], todayStr());
     const candidates = readySet(graph, state, rValue).filter((n) => n !== node);
@@ -12348,7 +11886,6 @@ ${details.join("\n")}`,
       stage: effectiveStage(state, node),
       mastery: fm.mastery,
       sections,
-      exercises,
       prereqs: [...graph.preOf[node]],
       suggest_next: [...unlocks, ...candidates.filter((n) => !unlocks.includes(n))].slice(0, 8)
     };
@@ -12374,15 +11911,7 @@ var LearnhubEngine = class {
     this.content = new Content(this.paths);
     this.bank = new QuestionBank(this.paths);
     this.proposals = new GraphProposals(this.paths, this.store, this.registry, centerRoot);
-    this.sessions = new Sessions(
-      this.paths,
-      this.store,
-      this.registry,
-      async (course) => this.loadView(course),
-      void 0,
-      this.content
-    );
-    this.sessions.settleRating = (courseName, graph, node, rating, today, sessionId) => this.settleRating(courseName, graph, node, rating, today, sessionId);
+    this.sessions = new Sessions(this.paths, async (course) => this.loadView(course));
   }
   // ---- 加载与解析 ----
   /** 单课完整视图：图 + frontmatter 状态（每次现读，文件量小，天然最新）。 */
@@ -12416,40 +11945,6 @@ var LearnhubEngine = class {
     if (hits.length > 1) throw new Error(`[learnhub] \u8282\u70B9\u300C${nodeSpec}\u300D\u5728\u591A\u95E8\u8BFE\u7A0B\u4E2D\u5B58\u5728\uFF0C\u8BF7\u7528\u300C\u8BFE\u7A0B/\u8282\u70B9\u300D\u6307\u5B9A\uFF1A${hits.map((h) => h.name).join("\u3001")}`);
     return { course: hits[0], node: nodeSpec };
   }
-  // ---- 评分落盘（D15 唯一入口） ----
-  /** 单节点评分落盘：frontmatter + journal。settle/grade 的共享底层。 */
-  async settleRating(courseName, graph, node, rating, today, sessionId) {
-    const course = await this.registry.get(courseName);
-    if (!course) throw new Error(`[settle] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseName}\u300D\u3002`);
-    const { state } = await this.loadView(course);
-    const fm = state[node] ?? await this.ensureNote(course.root, graph, node);
-    const sched = await getScheduler(this.paths, this.paths.courseRoot(course.root));
-    const firstLearn = !fm.fsrs?.reps;
-    const { fs: newFs, meta } = applyRating(fm, rating, today, sched);
-    const nextStage = stageAfter(newFs, rating, firstLearn);
-    const practice = await this.store.attemptStats(courseName, node);
-    const next = {
-      ...fm,
-      stage: nextStage,
-      fsrs: newFs,
-      mastery: masteryValue(newFs, fm.practice, fm.practice_ema)
-    };
-    void practice;
-    const [, regionName] = graph.blockOf[node];
-    const path = this.paths.courseNotePath(course.root, regionName, node);
-    await saveNote(path, next, (await loadNote(path)).body);
-    const rec = await this.store.appendJournal({
-      course: courseName,
-      node,
-      rating,
-      kind: meta.kind,
-      elapsed_days: meta.elapsed_days,
-      session: sessionId
-    });
-    const { state: stateNow } = await this.loadView(course);
-    await this.content.onStageChange(course.root, graph, stateNow, node, nextStage);
-    return { rec, newFs, kind: meta.kind, stage: nextStage };
-  }
   /** 无笔记节点补占位文件（保证 frontmatter 始终可查）。 */
   async ensureNote(root, graph, node) {
     const [, regionName] = graph.blockOf[node];
@@ -12458,22 +11953,38 @@ var LearnhubEngine = class {
     await saveNote(path, fm, "> \u5185\u5BB9\u5F85\u751F\u6210\u3002\n");
     return fm;
   }
-  // ---- status / recommend / today / settle / grade ----
+  // ---- status / recommend ----
   async statusJson() {
-    return this.sessions.statusJson(await this.enabledCourses());
+    const bankDue = await this.bankDueAll();
+    return this.sessions.statusJson(await this.enabledCourses(), bankDue);
   }
   async recommend(limit = 5) {
-    const events = await this.sessions.recommendEvents(await this.enabledCourses(), todayStr(), limit);
+    const bankDue = await this.bankDueAll();
+    const events = await this.sessions.recommendEvents(await this.enabledCourses(), bankDue, todayStr(), limit);
     return { date: todayStr(), events };
   }
-  async today(minutes) {
-    return this.sessions.today(await this.enabledCourses(), Math.round(minutes));
-  }
-  async settle(dateStr) {
-    return this.sessions.settle(dateStr);
-  }
-  async grade(nodeSpec, rating) {
-    return this.sessions.grade(nodeSpec, rating, await this.enabledCourses());
+  /** 全部启用课程的题库到期聚合：node 级最小题目 due（复习队列的数据源）。 */
+  async bankDueAll() {
+    const out = /* @__PURE__ */ new Map();
+    const today = todayStr();
+    for (const c of await this.enabledCourses()) {
+      const items = [];
+      let files = [];
+      try {
+        files = await readdir3(this.paths.bankDir(c.root));
+      } catch {
+        out.set(c.name, items);
+        continue;
+      }
+      for (const f of files.filter((f2) => f2.endsWith(".yaml"))) {
+        const node = f.replace(/\.yaml$/, "");
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+        const dues = bank.questions.filter((q) => !q.archived && q.fsrs?.reps && q.fsrs.due <= today).map((q) => q.fsrs.due);
+        if (dues.length) items.push({ node, due: dues.sort()[0], count: dues.length });
+      }
+      out.set(c.name, items);
+    }
+    return out;
   }
   // ---- doctor（fm schema 对账） ----
   async doctor() {
@@ -12497,7 +12008,7 @@ var LearnhubEngine = class {
       const audit = await runAudit(this.paths, c.root, c.name, graph, regions);
       if (audit.failed) failed = true;
       lines.push(`[${c.name}] \u5BA1\u8BA1\uFF1AERROR ${audit.errors.length} | WARN ${audit.warns.length} | INFO ${audit.infos.length}${audit.failed ? "\uFF08\u963B\u65AD\uFF09" : ""}`);
-      const done = new Set(Object.entries(state).filter(([, f]) => ["review", "mastered"].includes(f.stage)).map(([n]) => n));
+      const done = new Set(Object.entries(state).filter(([, f]) => ["review", "mastered", "skipped"].includes(f.stage)).map(([n]) => n));
       await writeReadyList(this.paths, c.root, graph, done);
     }
     if (failed) throw new Error(`[rebuild] \u5BA1\u8BA1\u5B58\u5728 ERROR\uFF1A
@@ -12584,19 +12095,6 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
       await this.updateNoteFm(path, fm);
     });
   }
-  async genExercises(courseKey, node, yamlText) {
-    const c = await this.registry.resolve(courseKey);
-    const { graph } = await this.loadView(c);
-    return this.content.genExercises(
-      c.root,
-      graph,
-      node,
-      yamlText,
-      async (n) => (await this.loadView(c)).state[n],
-      (rec) => this.store.appendJournal({ ...rec, course: c.name }),
-      node
-    );
-  }
   async contentQueue(courseKey, node) {
     const c = await this.registry.resolve(courseKey);
     return this.content.queueManual(c.root, node);
@@ -12610,60 +12108,12 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     }
     return out;
   }
-  // ---- 练习与判卷 ----
-  async exercises(courseKey, node) {
-    const c = await this.registry.resolve(courseKey);
-    const { graph } = await this.loadView(c);
-    return this.sessions.exercises(c.root, graph, node);
-  }
   async lesson(courseKey, node) {
     const c = await this.registry.resolve(courseKey);
     const { graph, state } = await this.loadView(c);
-    return this.sessions.lesson(c.name, c.root, graph, state, node);
-  }
-  async check(courseKey, node, exNo, answer) {
-    const c = await this.registry.resolve(courseKey);
-    const { graph } = await this.loadView(c);
-    return this.sessions.check(c.name, c.root, graph, node, exNo, answer);
-  }
-  async recordAttempt(courseKey, node, exNo, answer, judge, correct, feedback) {
-    const c = await this.registry.resolve(courseKey);
-    const { graph } = await this.loadView(c);
-    return this.sessions.recordAttempt(c.name, c.root, graph, node, exNo, answer, judge, correct, feedback);
-  }
-  /** AI 反思判卷（reflection / ai 题）：题目+评分要点+作答 → 模型 → {score, feedback}。
-   * 完成后自动 record-attempt 入流水（correct = score ≥ 0.6）。 */
-  async aiGrade(llmComplete2, courseKey, node, exNo, answer) {
-    const info = await this.check(courseKey, node, exNo, "");
-    if (info.judge !== "ai") throw new Error(`ex${exNo} \u4E0D\u662F AI \u5224\u5377\u9898\uFF08judge=${String(info.judge)}\uFF09\u3002`);
-    const rubric = String(info.answer ?? "");
-    const raw = await llmComplete2(
-      `## \u9898\u76EE
-
-${String(info.q ?? "")}
-
-## \u8BC4\u5206\u8981\u70B9
-
-${rubric}
-
-## \u5B66\u751F\u4F5C\u7B54
-
-${answer}`,
-      REFLECTION_GRADING_SYSTEM
-    );
-    let score = 0;
-    let feedback = "";
-    try {
-      const v = parseReflectionGrading(raw);
-      score = v.score;
-      feedback = v.feedback;
-    } catch {
-      score = answer.trim() ? 0.5 : 0;
-      feedback = raw.slice(0, 500);
-    }
-    const correct = score >= 0.6;
-    await this.recordAttempt(courseKey, node, exNo, answer, "ai", correct, feedback);
-    return { score: Math.round(score * 100), correct, feedback, raw };
+    const lesson = await this.sessions.lesson(c.name, c.root, graph, state, node);
+    lesson.mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
+    return lesson;
   }
   // ---- note resolve / 反馈区读取 ----
   /** 解析笔记 → { path, node, course }，任一环节缺失即抛错。 */
@@ -12671,7 +12121,7 @@ ${answer}`,
     const p = input.replace(/\\/g, "/");
     const rel = p.startsWith(`${vaultRoot}/`) ? p.slice(vaultRoot.length + 1) : p.replace(/^\/+/, "");
     const abs = `${vaultRoot}/${rel}`;
-    const raw = await readFile10(abs, "utf8");
+    const raw = await readFile9(abs, "utf8");
     const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const node = m ? (m[1].match(/^node:\s*(.+)$/m)?.[1] ?? "").trim() : "";
     if (!node) throw new Error(`${rel} \u7684 frontmatter \u7F3A\u5C11 node \u5B57\u6BB5\uFF0C\u4E0D\u662F\u8BFE\u7A0B\u6587\u4EF6\u3002`);
@@ -12684,7 +12134,7 @@ ${answer}`,
   }
   /** 提取笔记「内容反馈」区正文；仅占位符或为空返回 null。 */
   async feedbackBody(absPath) {
-    const raw = await readFile10(absPath, "utf8");
+    const raw = await readFile9(absPath, "utf8");
     const sec = raw.match(/## 内容反馈\n([\s\S]*?)(?=\n## |<!-- enc_candidates|$)/);
     const body = (sec?.[1] ?? "").replace(/在此写下你对本课内容的问题与建议.*$/m, "").trim();
     return body || null;
@@ -12724,13 +12174,14 @@ ${answer}`,
     }
     return { courses };
   }
-  /** 某节点题库题目列表（不含答案/评分要点）。 */
+  /** 某节点题库题目列表（不含答案/评分要点；带到期日与作答统计——刷卡视图）。 */
   async questions(courseKey, node) {
     const c = await this.registry.resolve(courseKey);
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
     return {
       course: c.name,
       node,
+      mastery: await this.nodeMastery(this.paths.courseRoot(c.root), node),
       questions: bank.questions.filter((q) => q.archived !== true).map((q, i) => ({
         id: q.id,
         kind: q.kind,
@@ -12738,7 +12189,10 @@ ${answer}`,
         no: i + 1,
         difficulty: q.difficulty ?? 1,
         ...q.options?.length ? { options: q.options } : {},
-        hasExplanation: Boolean(q.explanation)
+        hasExplanation: Boolean(q.explanation),
+        due: q.fsrs?.reps ? q.fsrs.due : null,
+        attempts: q.stats?.attempts ?? 0,
+        lastCorrect: q.stats?.attempts ? q.stats.correct / q.stats.attempts >= 0.6 : null
       }))
     };
   }
@@ -12801,8 +12255,23 @@ ${String(q.answer)}`,
     const fm = asFm(rawFm);
     if (fm) {
       const next = applyPracticeEvidence(fm, correct ? 1 : 0);
+      if (next.stage === "ready" || next.stage === "unseen") next.stage = "learning";
       await saveNote(path, next, body);
+      if (next.stage !== fm.stage) {
+        const { state: stateNow } = await this.loadView(c);
+        await this.content.onStageChange(c.root, graph, stateNow, node, next.stage);
+      }
     }
+    const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
+    const today = todayStr();
+    const { fs } = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched);
+    const stats = {
+      attempts: (q.stats?.attempts ?? 0) + 1,
+      correct: (q.stats?.correct ?? 0) + (correct ? 1 : 0),
+      last: today
+    };
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { fsrs: fs, stats });
+    const mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
     return {
       correct,
       score: Math.round(score * 100),
@@ -12810,55 +12279,92 @@ ${String(q.answer)}`,
       explanation: q.explanation ?? "",
       // 错题公布答案（allo answer_review 语义；reflection 的 rubric 也回显供对照）
       answer: q.kind === "true_false" ? q.answer : q.kind === "single_choice" ? q.answer : q.kind === "fill_in_blank" ? Array.isArray(q.answer) ? q.answer.join(" / ") : q.answer : String(q.answer),
-      kind: q.kind
+      kind: q.kind,
+      due: fs.due,
+      mastery
     };
   }
-  // ---- 学习面板扩展（打卡/日历/标签/题目管理/课程删除）----
-  /** 今日打卡状态（本地日；journal/practice 有行为即打卡，行为流水即事实）。 */
-  async checkinToday() {
-    const byDay = await this.store.activityCounts();
-    const today = byDay[todayStr()] ?? { journal: 0, practice: 0, total: 0 };
-    return { checked: today.total > 0, journal: today.journal, practice: today.practice, total: today.total };
+  /** 节点掌握度 = 该节点全部题目的作答正确率汇总（Σcorrect/Σattempts；无作答 → 0）。 */
+  async nodeMastery(courseRoot, node) {
+    const bank = await this.bank.load(courseRoot, node);
+    let attempts = 0;
+    let correct = 0;
+    for (const q of bank.questions) {
+      if (q.archived) continue;
+      attempts += q.stats?.attempts ?? 0;
+      correct += q.stats?.correct ?? 0;
+    }
+    if (!attempts) return 0;
+    return Math.round(correct / attempts * 100) / 100;
   }
-  /** 日历热力图数据（指定年；month 缺省=全年）。 */
-  async calendarStats(year, month) {
-    const byDay = await this.store.activityCounts();
-    const days = Object.entries(byDay).filter(([date]) => {
-      const m = date.match(/^(\d{4})-(\d{2})/);
-      if (!m || +m[1] !== year) return false;
-      return month === void 0 || +m[2] === month;
-    }).map(([date, c]) => ({ date, journal: c.journal, practice: c.practice, total: c.total })).sort((a, b) => a.date.localeCompare(b.date));
-    return { year, month: month ?? null, days };
+  // ---- 节点跳过 / 完成确认 ----
+  /** 跳过（已有基础）：stage 置 skipped，调度视同已通过；取消跳过回 ready。 */
+  async nodeSkip(courseKey, node, skipped) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[skip] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    if (!state[node]) await this.ensureNote(c.root, graph, node);
+    const stage = skipped ? "skipped" : "ready";
+    const [, regionName] = graph.blockOf[node];
+    const path = this.paths.courseNotePath(c.root, regionName, node);
+    const { fm: rawFm, body } = await loadNote(path);
+    const fm = asFm(rawFm);
+    if (fm) await saveNote(path, { ...fm, stage }, body);
+    return { course: c.name, node, stage };
   }
-  /** 全中心标签聚合（课程 tags + 启用课程全部题库的题目 tags，去重排序）。 */
-  async listTags() {
-    const tags = /* @__PURE__ */ new Set();
-    const courses = await this.registry.enabled();
-    for (const c of courses) (c.tags ?? []).forEach((t) => tags.add(t));
-    for (const c of courses) {
-      let files = [];
-      try {
-        files = await readdir3(this.paths.bankDir(c.root));
-      } catch {
+  /** 完成确认：本轮内容已学——全部未归档题目纳入复习循环（已作答的按各自 FSRS
+   * 调度到期复习，没作答的初始化为明天起刷），节点 stage→review。节点 frontmatter
+   * 同步写一份「聚合代表」fsrs（全部题里到期最早的那张卡）：审计 E5 要求 review
+   * 有 fsrs，且 R_gate 的可提取性仍从节点状态读。 */
+  async nodeComplete(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[complete] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    if (!state[node]) await this.ensureNote(c.root, graph, node);
+    const courseRoot = this.paths.courseRoot(c.root);
+    const sched = await getScheduler(this.paths, courseRoot);
+    const today = todayStr();
+    const bank = await this.bank.load(courseRoot, node);
+    let initialized = 0;
+    let due = null;
+    let repCard = null;
+    for (const q of bank.questions) {
+      if (q.archived) continue;
+      if (q.fsrs?.reps) {
+        const d = q.fsrs.due;
+        if (d && (!due || d < due)) {
+          due = d;
+          repCard = q.fsrs;
+        }
         continue;
       }
-      for (const f of files.filter((f2) => f2.endsWith(".yaml"))) {
-        const bank = await this.bank.load(this.paths.courseRoot(c.root), f.replace(/\.yaml$/, ""));
-        bank.questions.forEach((q) => (q.tags ?? []).forEach((t) => tags.add(t)));
+      const { fs } = applyRatingBlock(null, 3, today, sched);
+      await this.bank.updateQuestion(courseRoot, node, q.id, { fsrs: fs });
+      initialized++;
+      if (!due || fs.due < due) {
+        due = fs.due;
+        repCard = fs;
       }
     }
-    return [...tags].sort();
+    if (state[node]?.stage === "mastered" || state[node]?.stage === "skipped") {
+      return { course: c.name, node, stage: state[node].stage, initialized, due };
+    }
+    const [, regionName] = graph.blockOf[node];
+    const path = this.paths.courseNotePath(c.root, regionName, node);
+    const { fm: rawFm, body } = await loadNote(path);
+    const fm = asFm(rawFm);
+    if (fm && fm.stage !== "review") {
+      const next = { ...fm, stage: "review" };
+      if (repCard) next.fsrs = repCard;
+      next.mastery = await this.nodeMastery(courseRoot, node);
+      await saveNote(path, next, body);
+      const { state: stateNow } = await this.loadView(c);
+      await this.content.onStageChange(c.root, graph, stateNow, node, "review");
+    }
+    return { course: c.name, node, stage: "review", initialized, due };
   }
-  async setCourseTags(courseKey, tags) {
-    const c = await this.registry.resolve(courseKey);
-    return { course: c.name, tags: await this.registry.setTags(c.name, tags) };
-  }
-  async setQuestionTags(courseKey, node, qid, tags) {
-    const c = await this.registry.resolve(courseKey);
-    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { tags });
-    return { course: c.name, node, qid, tags };
-  }
-  /** 全部题库条目（题目管理列表；不含答案）。 */
+  // ---- 学习面板扩展（题目管理/课程删除）----
+  /** 全部题库条目（题目管理列表；不含答案，带到期与统计）。 */
   async questionsAll(courseKey) {
     const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled();
     const out = [];
@@ -12955,7 +12461,7 @@ ${body}`);
     const src = this.paths.courseRoot(c.root);
     const trash = `${this.paths.trashDir}/${c.root}-${Date.now()}`;
     if (existsSync6(src)) {
-      await mkdir9(this.paths.trashDir, { recursive: true });
+      await mkdir8(this.paths.trashDir, { recursive: true });
       await rename3(src, trash);
     }
     return { removed: c.name, trash };
@@ -13021,7 +12527,7 @@ async function runLog(tool, output) {
   const path = `${engine.paths.centerStateDir}/\u8FD0\u884C\u65E5\u5FD7.md`;
   try {
     if (!existsSync7(path)) {
-      await mkdir10(engine.paths.centerStateDir, { recursive: true });
+      await mkdir9(engine.paths.centerStateDir, { recursive: true });
       await appendFile2(path, "# \u8FD0\u884C\u65E5\u5FD7\n\n> \u63D2\u4EF6\u8C03\u7528 learnhub \u5F15\u64CE\u7684\u8BB0\u5F55\u3002\u5F15\u64CE\u81EA\u52A8\u4EA7\u51FA\uFF0C\u52FF\u624B\u5DE5\u6539\u3002\n", "utf8");
     }
     const ts = (/* @__PURE__ */ new Date()).toLocaleString("sv-SE");
@@ -13045,42 +12551,6 @@ async function apiRun(tool, fn) {
   const out = await fn();
   await runLog(tool, typeof out === "string" ? out : JSON.stringify(out));
   return out;
-}
-function unwrapLink(s) {
-  const m = s.trim().match(/^\[\[(.+?)(?:\|(.+?))?\]\]$/);
-  if (!m) return s.trim();
-  if (m[2]) return m[2].trim();
-  return m[1].split("/").pop().trim();
-}
-async function writeBack(course, node, rating) {
-  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const path = engine.paths.sessionPath(today);
-  let raw;
-  try {
-    raw = await readFile11(path, "utf8");
-  } catch {
-    return { ok: false, message: "\u4ECA\u65E5\u5DE5\u4F5C\u5355\u4E0D\u5B58\u5728\uFF0C\u5148\u300C\u751F\u6210\u4ECA\u65E5\u5DE5\u4F5C\u5355\u300D\u3002" };
-  }
-  const lines = raw.split("\n");
-  let section = "";
-  const lineRe = /^(\s*- \[[ xX]?\] (.+?) ｜.*?(?:首学评分|复习评分|评分)：)\s*\d?\s*$/;
-  let hit = false;
-  for (let i = 0; i < lines.length; i++) {
-    const hm = lines[i].match(/^##\s*\[(.+?)\]/);
-    if (hm) section = hm[1].trim();
-    if (section !== course) continue;
-    const m = lines[i].match(lineRe);
-    if (m && unwrapLink(m[2]) === node) {
-      lines[i] = `${m[1]}${rating}`;
-      hit = true;
-      break;
-    }
-  }
-  if (!hit) {
-    return { ok: false, message: `\u5DE5\u4F5C\u5355\u7684 [${course}] \u6BB5\u6CA1\u6709\u300C${node}\u300D\u7684\u8BC4\u5206\u884C\uFF08\u4ECA\u65E5\u672A\u6392\u5165\uFF1F\uFF09` };
-  }
-  await writeFile9(path, lines.join("\n"), "utf8");
-  return { ok: true, message: `\u8BC4\u5206 ${rating} \u5DF2\u5199\u56DE\u4ECA\u65E5\u5DE5\u4F5C\u5355\uFF0C\u8BB0\u5F97\u300C\u7ED3\u7B97\u300D\u5165\u5E93\u3002` };
 }
 async function llmComplete(ctx, prompt, system) {
   const msg = createUserMessage({
@@ -13166,15 +12636,6 @@ function cancelGeneration(course, node) {
   if (job.status === "running") job.status = "cancelling";
   return { cancelled: true, status: job.status };
 }
-async function aiGrade(ctx, course, node, ex, answer) {
-  return engine.aiGrade(async (prompt, system) => {
-    if (system) return llmComplete(ctx, prompt, system);
-    const tpl = await engine.loadPrompt("AI\u5224\u5377");
-    return llmComplete(ctx, `${tpl}
-
-${prompt}`);
-  }, course, node, ex, answer);
-}
 function sendJson(res, code, body) {
   res.writeHead(code, {
     "content-type": "application/json; charset=utf-8",
@@ -13193,12 +12654,6 @@ function need(body, key) {
   if (typeof v !== "string" || !v.trim()) throw new Error(`missing required field: ${key}`);
   return v.trim();
 }
-function needEx(body, key) {
-  const v = body[key];
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  if (!Number.isFinite(n)) throw new Error(`missing required field: ${key}`);
-  return Math.round(n);
-}
 async function handleApi(ctx, req, res) {
   const url = new URL(req.url ?? "/", "http://localhost");
   const route = url.pathname.slice(API.length);
@@ -13214,13 +12669,6 @@ async function handleApi(ctx, req, res) {
         enabled: String(c.enabled !== false)
       }));
       sendJson(res, 200, list);
-      return;
-    }
-    if (req.method === "GET" && route === "/exercises") {
-      const node = url.searchParams.get("node");
-      const course = url.searchParams.get("course");
-      if (!node || !course) throw new Error("missing required field: node/course");
-      sendJson(res, 200, await apiRun("api/exercises", () => engine.exercises(course, node)));
       return;
     }
     if (req.method === "GET" && route === "/lesson") {
@@ -13261,7 +12709,7 @@ async function handleApi(ctx, req, res) {
       if (!mime) throw new Error(`unsupported file type: ${ext || "(none)"}`);
       let buf;
       try {
-        buf = await readFile11(`${VAULT}/${rel}`);
+        buf = await readFile10(`${VAULT}/${rel}`);
       } catch {
         sendJson(res, 404, { error: `file not found: ${rel}` });
         return;
@@ -13290,21 +12738,6 @@ async function handleApi(ctx, req, res) {
       sendJson(res, 200, await apiRun("api/doctor", () => engine.doctor()));
       return;
     }
-    if (req.method === "GET" && route === "/checkins/today") {
-      sendJson(res, 200, await apiRun("api/checkins/today", () => engine.checkinToday()));
-      return;
-    }
-    if (req.method === "GET" && route === "/stats/calendar") {
-      const year = Number(url.searchParams.get("year")) || (/* @__PURE__ */ new Date()).getFullYear();
-      const monthRaw = url.searchParams.get("month");
-      const month = monthRaw && Number.isFinite(Number(monthRaw)) ? Number(monthRaw) : void 0;
-      sendJson(res, 200, await apiRun("api/stats/calendar", () => engine.calendarStats(year, month)));
-      return;
-    }
-    if (req.method === "GET" && route === "/tags") {
-      sendJson(res, 200, await apiRun("api/tags", () => engine.listTags()));
-      return;
-    }
     if (req.method === "GET" && route === "/questions-all") {
       const course = url.searchParams.get("course") ?? void 0;
       sendJson(res, 200, await apiRun("api/questions-all", () => engine.questionsAll(course)));
@@ -13316,42 +12749,16 @@ async function handleApi(ctx, req, res) {
     }
     if (req.method === "POST") {
       const body = await readJson(req);
-      if (route === "/today") {
-        const minutes = typeof body.minutes === "number" && Number.isFinite(body.minutes) ? body.minutes : 25;
-        sendJson(res, 200, { message: (await engine.today(minutes)).message });
-        return;
-      }
-      if (route === "/settle") {
-        const r = await engine.settle();
-        if (r.code !== 0) throw new Error(r.message);
-        sendJson(res, 200, { message: r.message });
-        return;
-      }
       if (route === "/rebuild") {
         sendJson(res, 200, { message: (await engine.rebuild()).message });
         return;
       }
-      if (route === "/check") {
-        const out = await engine.check(
-          need(body, "course"),
-          need(body, "node"),
-          needEx(body, "ex"),
-          typeof body.answer === "string" ? body.answer : ""
-        );
-        sendJson(res, 200, out);
+      if (route === "/node/skip") {
+        sendJson(res, 200, await apiRun("api/node/skip", () => engine.nodeSkip(need(body, "course"), need(body, "node"), body.skipped !== false)));
         return;
       }
-      if (route === "/grade") {
-        const rating = Number(body.rating);
-        if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error("rating must be 1-4");
-        const out = await engine.grade(`${need(body, "course")}/${need(body, "node")}`, rating);
-        sendJson(res, 200, { message: out });
-        return;
-      }
-      if (route === "/writeback") {
-        const rating = Number(body.rating);
-        if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error("rating must be 1-4");
-        sendJson(res, 200, await writeBack(need(body, "course"), need(body, "node"), rating));
+      if (route === "/node/complete") {
+        sendJson(res, 200, await apiRun("api/node/complete", () => engine.nodeComplete(need(body, "course"), need(body, "node"))));
         return;
       }
       if (route === "/feedback") {
@@ -13379,16 +12786,6 @@ async function handleApi(ctx, req, res) {
       if (route === "/question-generate") {
         const count = Number(body.count);
         sendJson(res, 200, await apiRun("api/question-generate", () => generateQuiz(ctx, need(body, "course"), need(body, "node"), Number.isInteger(count) && count > 0 ? count : 6)));
-        return;
-      }
-      if (route === "/ai-grade") {
-        sendJson(res, 200, await apiRun("api/ai-grade", () => aiGrade(
-          ctx,
-          need(body, "course"),
-          need(body, "node"),
-          needEx(body, "ex"),
-          typeof body.answer === "string" ? body.answer : ""
-        )));
         return;
       }
       if (route === "/review") {
@@ -13439,16 +12836,6 @@ async function handleApi(ctx, req, res) {
     }
     if (req.method === "PUT") {
       const body = await readJson(req);
-      if (route === "/course/tags") {
-        const tags = Array.isArray(body.tags) ? body.tags.map(String) : [];
-        sendJson(res, 200, await apiRun("api/course/tags", () => engine.setCourseTags(need(body, "course"), tags)));
-        return;
-      }
-      if (route === "/question/tags") {
-        const tags = Array.isArray(body.tags) ? body.tags.map(String) : [];
-        sendJson(res, 200, await apiRun("api/question/tags", () => engine.setQuestionTags(need(body, "course"), need(body, "node"), need(body, "qid"), tags)));
-        return;
-      }
       if (route === "/question-update") {
         const patch = typeof body.patch === "object" && body.patch !== null ? body.patch : {};
         sendJson(res, 200, await engine.questionUpdate(need(body, "course"), need(body, "node"), need(body, "qid"), patch));
@@ -13493,42 +12880,27 @@ function apply(ctx, config) {
     () => run("learnhub_status", async () => JSON.stringify(await engine.statusJson()))
   );
   tool(
-    "learnhub_today",
-    "Generate today's worksheet (\u4F1A\u8BDD/YYYY-MM-DD.md) aggregating all enabled courses.",
-    { minutes: { type: "number", description: "Available minutes today (default 25)" } },
-    (args) => run("learnhub_today", async () => (await engine.today(args.minutes === void 0 ? 25 : args.minutes)).message)
-  );
-  tool(
-    "learnhub_settle",
-    "Settle today's worksheet into the review system (per-section course attribution, audit-gated). Ratings must already be written into the worksheet.",
-    {},
-    () => run("learnhub_settle", async () => {
-      const r = await engine.settle();
-      if (r.code !== 0) throw new Error(r.message);
-      return r.message;
-    })
-  );
-  tool(
-    "learnhub_grade",
-    'Backfill a single 1-4 rating for a node (1=forgot, 2=hard, 3=normal, 4=easy). Use "course/node" when the node name is ambiguous across courses.',
+    "learnhub_skip",
+    "Mark a node as skipped (learner already knows it) or un-skip. Skipped nodes count as passed: they leave the recommendation queue and no longer block successors.",
     {
-      node: { type: "string", required: true, description: 'Node name, or "course/node" to disambiguate' },
-      rating: { type: "number", required: true, description: "Rating 1-4" }
-    },
-    (args) => run("learnhub_grade", () => engine.grade(args.node, args.rating))
-  );
-  tool(
-    "learnhub_exercises",
-    "Fetch the exercise list of a course node as JSON (no answers). Fields: ex, q, difficulty, check (sympy|choice|ai|human), uses, options (choice only).",
-    {
+      course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name" },
-      course: { type: "string", required: true, description: "Course name" }
+      skipped: { type: "boolean", description: "true to skip (default), false to un-skip" }
     },
-    (args) => run("learnhub_exercises", async () => JSON.stringify(await engine.exercises(args.course, args.node)))
+    (args) => run("learnhub_skip", async () => JSON.stringify(await engine.nodeSkip(args.course, args.node, args.skipped !== false)))
+  );
+  tool(
+    "learnhub_complete",
+    "Confirm a node has been learned this round: unanswered bank questions get their FSRS card initialized (due tomorrow) and the node stage moves to review, entering the review rotation.",
+    {
+      course: { type: "string", required: true, description: "Course name" },
+      node: { type: "string", required: true, description: "Node name" }
+    },
+    (args) => run("learnhub_complete", async () => JSON.stringify(await engine.nodeComplete(args.course, args.node)))
   );
   tool(
     "learnhub_lesson",
-    "Fetch one node's lesson pack as JSON: course body split into teaching sections (\u7EC3\u4E60/\u53CD\u9988 excluded, \u7B54\u6848 merged into \u4F8B\u9898), its exercises, prereqs, and suggested next nodes. Use this to teach a node step by step.",
+    "Fetch one node's lesson pack as JSON: course body split into teaching sections (\u7EC3\u4E60/\u53CD\u9988 excluded, \u7B54\u6848 merged into \u4F8B\u9898), prereqs, and suggested next nodes. Use this to teach a node step by step.",
     {
       node: { type: "string", required: true, description: "Node name" },
       course: { type: "string", required: true, description: "Course name" }
@@ -13542,17 +12914,6 @@ function apply(ctx, config) {
     (args) => run("learnhub_recommend", async () => JSON.stringify(await engine.recommend(args.limit === void 0 ? 5 : args.limit)))
   );
   tool(
-    "learnhub_check",
-    'Judge one exercise answer. sympy/choice return correct boolean; ai returns {"judge":"ai","q","answer":rubric} without recording (the panel route /ai-grade does the model call); human returns {"judge":"human","answer":reference} for self-grading.',
-    {
-      node: { type: "string", required: true, description: "Node name" },
-      ex: { type: "string", required: true, description: 'Exercise number, e.g. "ex1"' },
-      answer: { type: "string", required: true, description: 'User answer ("" for human exercises)' },
-      course: { type: "string", required: true, description: "Course name" }
-    },
-    (args) => run("learnhub_check", async () => JSON.stringify(await engine.check(args.course, args.node, Number(args.ex), args.answer)))
-  );
-  tool(
     "learnhub_rebuild",
     "Run audit gate + ready-list regeneration for all enabled courses, or one course.",
     { course: { type: "string", description: "Course name; omit to rebuild all enabled courses" } },
@@ -13563,16 +12924,6 @@ function apply(ctx, config) {
     "Submit content feedback of a course note: reads the note\u300C\u5185\u5BB9\u53CD\u9988\u300Dsection and marks the node flagged + regeneration queue.",
     { path: { type: "string", required: true, description: "Note path, vault-relative or absolute" } },
     (args) => run("learnhub_feedback", () => engine.submitFeedback(VAULT, CENTER_REL, args.path))
-  );
-  tool(
-    "learnhub_writeback",
-    "D15: write a 1-4 rating into the rating line of today's worksheet for one node. This is the only scheduling file write allowed outside the engine.",
-    {
-      course: { type: "string", required: true, description: "Course name" },
-      node: { type: "string", required: true, description: "Node name" },
-      rating: { type: "number", required: true, description: "Rating 1-4" }
-    },
-    async (args) => run("learnhub_writeback", async () => JSON.stringify(await writeBack(args.course, args.node, args.rating)))
   );
   tool(
     "learnhub_note_resolve",
@@ -13617,16 +12968,6 @@ function apply(ctx, config) {
     })
   );
   tool(
-    "learnhub_exercises_gen",
-    "Generate exercises for a course node: validates the ExerciseSet YAML (answer presence, choice letters, uses in graph) then writes into the note practice section.",
-    {
-      course: { type: "string", required: true, description: "Course name" },
-      node: { type: "string", required: true, description: "Node name (must match the node field inside the YAML)" },
-      yaml: { type: "string", required: true, description: "ExerciseSet YAML text (node/mode/exercises[q,answer,check,difficulty,uses])" }
-    },
-    (args) => run("learnhub_exercises_gen", async () => JSON.stringify(await engine.genExercises(args.course, args.node, args.yaml)))
-  );
-  tool(
     "learnhub_generate",
     "Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics).",
     {
@@ -13656,7 +12997,7 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_question_answer",
-    "Answer one bank question (allo grading): auto-judged 1.0/0.0 (reflection graded by AI against its rubric), records practice evidence (JSONL + counters/EMA). Scheduling is NOT touched here \u2014 rate via learnhub_grade or the worksheet writeback.",
+    "Answer one bank question (flashcard model): auto-judged 1.0/0.0 (reflection graded by AI against its rubric); the result drives THAT question's FSRS schedule (correct=Good, wrong=Again) and the node mastery aggregates per-question stats.",
     {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name" },
@@ -13664,20 +13005,6 @@ function apply(ctx, config) {
       answer: { type: "string", required: true, description: "User answer (choice: letter; true_false: \u5BF9/\u9519; fill_in_blank: text; reflection: free text)" }
     },
     (args) => run("learnhub_question_answer", async () => JSON.stringify(await engine.questionAnswer((prompt) => llmComplete(ctx, prompt), args.course, args.node, args.qid, args.answer)))
-  );
-  tool(
-    "learnhub_record_attempt",
-    'Record one already-graded attempt for a note exercise (practice JSONL + frontmatter counters/EMA). Use after you judged an "ai" or "human" exercise yourself; learnhub_check with judge=ai/human does NOT record.',
-    {
-      course: { type: "string", required: true, description: "Course name" },
-      node: { type: "string", required: true, description: "Node name" },
-      ex: { type: "number", required: true, description: "Exercise number, e.g. 1" },
-      answer: { type: "string", required: true, description: "User answer" },
-      judge: { type: "string", required: true, description: "Judge kind: sympy | choice | ai | human" },
-      correct: { type: "boolean", required: true, description: "Grading result (decide it yourself for ai/human exercises)" },
-      feedback: { type: "string", description: "Optional grading feedback" }
-    },
-    (args) => run("learnhub_record_attempt", async () => JSON.stringify(await engine.recordAttempt(args.course, args.node, args.ex, args.answer, args.judge, args.correct, args.feedback)))
   );
   ctx.effect(
     () => ctx.webServer.register({ kind: "prefix", path: API, handler: (req, res) => handleApi(ctx, req, res) }),
@@ -13700,10 +13027,10 @@ function apply(ctx, config) {
           if (!(file + sep).startsWith(PAGE_DIST)) file = join3(PAGE_DIST, "index.html");
           let data;
           try {
-            data = await readFile11(file);
+            data = await readFile10(file);
           } catch {
             file = join3(PAGE_DIST, "index.html");
-            data = await readFile11(file);
+            data = await readFile10(file);
           }
           const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
           const mime = ASSET_MIME[ext] ?? "application/octet-stream";
@@ -13721,7 +13048,7 @@ function apply(ctx, config) {
     }),
     "learnhub: panel SPA (web/dist)"
   );
-  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 21 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`);
+  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 15 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`);
   void engine.statusJson().then((doc) => console.log(`[learnhub] self-check status OK (${JSON.stringify(doc).length} bytes)`)).catch((err) => console.error(`[learnhub] self-check FAILED: ${err instanceof Error ? err.message : String(err)}`));
 }
 export {

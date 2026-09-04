@@ -87,7 +87,6 @@ createServer(async (req, res) => {
         case '/status': return sendJson(res, 200, await engine.statusJson())
         case '/courses': return sendJson(res, 200, (await engine.enabledCourses()).map(c => ({ name: c.name, root: c.root, enabled: String(c.enabled !== false) })))
         case '/courses/tree': return sendJson(res, 200, await engine.coursesTree(q('course')))
-        case '/exercises': return sendJson(res, 200, await engine.exercises(need({ course: q('course') }, 'course'), need({ node: q('node') }, 'node')))
         case '/lesson': return sendJson(res, 200, await engine.lesson(q('course'), need({ node: q('node') }, 'node')))
         case '/recommend': return sendJson(res, 200, await engine.recommend(Number(q('limit') ?? 5)))
         case '/queue': return sendJson(res, 200, await engine.queueItemsAll())
@@ -107,20 +106,11 @@ createServer(async (req, res) => {
         case '/graph': return sendJson(res, 200, await engine.graphAnalyze(q('course'), url.searchParams.get('elements') === '1'))
         case '/proposals': return sendJson(res, 200, await engine.graphProposals())
         case '/doctor': return sendJson(res, 200, await engine.doctor())
-        case '/checkins/today': return sendJson(res, 200, await engine.checkinToday())
-        case '/stats/calendar': {
-          const year = Number(q('year')) || new Date().getFullYear()
-          const mRaw = q('month')
-          return sendJson(res, 200, await engine.calendarStats(year, mRaw ? Number(mRaw) : undefined))
-        }
-        case '/tags': return sendJson(res, 200, await engine.listTags())
         case '/generate/status': return sendJson(res, 200, [])
       }
     } else if (req.method === 'PUT') {
       const body = await readJson(req)
       switch (route) {
-        case '/course/tags': return sendJson(res, 200, await engine.setCourseTags(need(body, 'course'), Array.isArray(body.tags) ? body.tags.map(String) : []))
-        case '/question/tags': return sendJson(res, 200, await engine.setQuestionTags(need(body, 'course'), need(body, 'node'), need(body, 'qid'), Array.isArray(body.tags) ? body.tags.map(String) : []))
         case '/question-update': {
           const patch = typeof body.patch === 'object' && body.patch !== null ? body.patch : {}
           return sendJson(res, 200, await engine.questionUpdate(need(body, 'course'), need(body, 'node'), need(body, 'qid'), patch))
@@ -129,25 +119,9 @@ createServer(async (req, res) => {
     } else if (req.method === 'POST') {
       const body = await readJson(req)
       switch (route) {
-        case '/today': return sendJson(res, 200, { message: (await engine.today(typeof body.minutes === 'number' ? body.minutes : 25)).message })
-        case '/settle': {
-          const r = await engine.settle()
-          if (r.code !== 0) throw new Error(r.message)
-          return sendJson(res, 200, { message: r.message })
-        }
         case '/rebuild': return sendJson(res, 200, { message: (await engine.rebuild()).message })
-        case '/check': return sendJson(res, 200, await engine.check(need(body, 'course'), need(body, 'node'), Number(body.ex), typeof body.answer === 'string' ? body.answer : ''))
-        case '/grade': {
-          const rating = Number(body.rating)
-          if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error('rating must be 1-4')
-          return sendJson(res, 200, { message: await engine.grade(`${need(body, 'course')}/${need(body, 'node')}`, rating) })
-        }
-        case '/writeback': {
-          const rating = Number(body.rating)
-          if (!Number.isInteger(rating) || rating < 1 || rating > 4) throw new Error('rating must be 1-4')
-          const g = await engine.grade(`${need(body, 'course')}/${need(body, 'node')}`, rating)
-          return sendJson(res, 200, { message: g })
-        }
+        case '/node/skip': return sendJson(res, 200, await engine.nodeSkip(need(body, 'course'), need(body, 'node'), body.skipped !== false))
+        case '/node/complete': return sendJson(res, 200, await engine.nodeComplete(need(body, 'course'), need(body, 'node')))
         case '/question-answer':
           // dev-server 无模型：reflection 走引擎的「非空即对」降级；其余题型机器判卷
           return sendJson(res, 200, await engine.questionAnswer(async () => { throw new Error('dev-server 无模型') }, need(body, 'course'), need(body, 'node'), need(body, 'qid'), typeof body.answer === 'string' ? body.answer : ''))

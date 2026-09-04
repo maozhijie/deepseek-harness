@@ -45,19 +45,18 @@ export const api = {
   recommend: (limit = 8) => http<import('./types').RecommendDoc>('GET', `/recommend?limit=${limit}`),
   queue: () => http<import('./types').QueueItem[]>('GET', '/queue'),
   lesson: (node: string, course?: string) =>
-    http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: Array<{ title: string; md: string }>; exercises: unknown[]; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
+    http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: Array<{ title: string; md: string }>; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
   questions: (course: string, node: string) =>
-    http<{ course: string; node: string; questions: import('./types').QuestionItem[] }>('GET', `/questions${q({ course, node })}`),
+    http<{ course: string; node: string; mastery: number; questions: import('./types').QuestionItem[] }>('GET', `/questions${q({ course, node })}`),
   questionAnswer: (course: string, node: string, qid: string, answer: string) =>
     http<import('./types').AnswerResult>('POST', '/question-answer', { course, node, qid, answer }),
-  today: (course?: string) => http<{ message: string }>('POST', '/today', course ? { course } : {}),
-  writeback: (course: string, node: string, rating: number) =>
-    http<{ message: string }>('POST', '/writeback', { course, node, rating }),
-  grade: (course: string, node: string, rating: number) =>
-    http<{ message: string }>('POST', '/grade', { course, node, rating }),
+  nodeSkip: (course: string, node: string, skipped = true) =>
+    http<{ course: string; node: string; stage: string }>('POST', '/node/skip', { course, node, skipped }),
+  nodeComplete: (course: string, node: string) =>
+    http<{ course: string; node: string; stage: string; initialized: number; due: string | null }>('POST', '/node/complete', { course, node }),
   generate: (course: string, node: string) => http<{ message: string }>('POST', '/generate', { course, node }),
   questionGenerate: (course: string, node: string, count = 6) =>
-    http<{ course: string; node: string; added: number; total: number }>('POST', '/question-generate', { course, node, count }),
+    http<{ course: string; node: string; added: number; skipped: number; total: number }>('POST', '/question-generate', { course, node, count }),
   generateStatus: () => http<import('./types').GenJobItem[]>('GET', '/generate/status'),
   generateCancel: (course: string, node: string) =>
     http<{ cancelled: boolean; status?: string }>('POST', '/generate/cancel', { course, node }),
@@ -68,14 +67,6 @@ export const api = {
     http<Record<string, unknown>>('POST', '/proposals/apply', { kind, id }),
   proposalReject: (id: number, note = '') => http<{ message: string }>('POST', '/proposals/reject', { id, note }),
   doctor: () => http<import('./types').DoctorDoc>('GET', '/doctor'),
-  checkinToday: () => http<import('./types').CheckinDoc>('GET', '/checkins/today'),
-  calendar: (year: number, month?: number) =>
-    http<import('./types').CalendarDoc>('GET', `/stats/calendar${q({ year, month })}`),
-  tags: () => http<string[]>('GET', '/tags'),
-  setCourseTags: (course: string, tags: string[]) =>
-    http<{ course: string; tags: string[] }>('PUT', '/course/tags', { course, tags }),
-  setQuestionTags: (course: string, node: string, qid: string, tags: string[]) =>
-    http<{ course: string; node: string; qid: string; tags: string[] }>('PUT', '/question/tags', { course, node, qid, tags }),
   questionsAll: (course?: string) =>
     http<{ total: number; questions: import('./types').BankEntry[] }>('GET', `/questions-all${q({ course })}`),
   questionAdd: (course: string, node: string, question: Record<string, unknown>) =>

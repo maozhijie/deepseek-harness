@@ -1,7 +1,7 @@
-/** 四题型作答卡（移植自 allo QuestionDialogs 的交互骨架）：
- * single_choice / multi_choice / true_false 本地判卷、fill_in_blank 走引擎
- * 自动判卷（llm → 降级）。结果内联展示判卷反馈。 */
-import { Button, Checkbox, Input, Message, Radio, Tag, Typography } from '@arco-design/web-react'
+/** 三题型作答卡（allo evaluate 交互）：single_choice / true_false 选项作答、
+ * fill_in_blank / reflection 文本作答；全部提交引擎判卷。结果内联展示判卷反馈；
+ * 作答即驱动该题 FSRS 调度（对=Good、错=Again）。 */
+import { Button, Input, Message, Radio, Tag, Typography } from '@arco-design/web-react'
 import { useState } from 'react'
 import { api } from '../api'
 import type { QuestionItem } from '../types'
@@ -15,7 +15,7 @@ export interface AnswerOutcome {
 }
 
 const KIND_LABEL: Record<QuestionItem['kind'], string> = {
-  single_choice: '单选', multi_choice: '多选', fill_in_blank: '填空', true_false: '判断',
+  single_choice: '单选', fill_in_blank: '填空', true_false: '判断', reflection: '反思',
 }
 
 export default function QuestionCard(props: {
@@ -27,27 +27,20 @@ export default function QuestionCard(props: {
 }) {
   const { question: q } = props
   const [choice, setChoice] = useState<string>('')
-  const [multi, setMulti] = useState<string[]>([])
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<AnswerOutcome | null>(null)
   const [redoToken, setRedoToken] = useState(0)
 
-  const canSubmit = !busy && (
-    q.kind === 'single_choice' ? choice !== ''
-      : q.kind === 'multi_choice' ? multi.length > 0
-        : q.kind === 'true_false' ? choice !== ''
-          : text.trim() !== ''
-  )
+  const textKind = q.kind === 'fill_in_blank' || q.kind === 'reflection'
+  const canSubmit = !busy && (textKind ? text.trim() !== '' : choice !== '')
 
   const submit = async () => {
     setBusy(true)
     try {
-      const answer = q.kind === 'multi_choice'
-        ? multi.sort().join('|')
-        : q.kind === 'true_false' ? (choice === 'T' ? 'true' : 'false')
-          : q.kind === 'fill_in_blank' ? text.trim()
-            : choice
+      const answer = q.kind === 'true_false' ? (choice === 'T' ? 'true' : 'false')
+        : textKind ? text.trim()
+          : choice
       const res = await api.questionAnswer(props.course, props.node, q.id, answer)
       const oc: AnswerOutcome = { correct: res.correct ?? null, judge: res.judge, feedback: res.feedback }
       setOutcome(oc)
@@ -62,7 +55,6 @@ export default function QuestionCard(props: {
   const redo = () => {
     setOutcome(null)
     setChoice('')
-    setMulti([])
     setText('')
     setRedoToken(t => t + 1)
   }
@@ -78,30 +70,25 @@ export default function QuestionCard(props: {
       </div>
       <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{q.q}</div>
 
-      {q.kind === 'single_choice' && (
-        <Radio.Group value={choice} onChange={v => setChoice(v)} direction='vertical' disabled={!!outcome}>
-          {(q.options ?? []).map((opt, i) => (
-            <Radio key={i} value={String.fromCharCode(65 + i)}>{String.fromCharCode(65 + i)}. {opt}</Radio>
-          ))}
-        </Radio.Group>
+      {(q.kind === 'single_choice' || q.kind === 'true_false') && (
+        q.kind === 'single_choice' ? (
+          <Radio.Group value={choice} onChange={v => setChoice(v)} direction='vertical' disabled={!!outcome}>
+            {(q.options ?? []).map((opt, i) => (
+              <Radio key={i} value={String.fromCharCode(65 + i)}>{String.fromCharCode(65 + i)}. {opt}</Radio>
+            ))}
+          </Radio.Group>
+        ) : (
+          <Radio.Group value={choice} onChange={v => setChoice(v)} disabled={!!outcome}>
+            <Radio value='T'>正确</Radio>
+            <Radio value='F'>错误</Radio>
+          </Radio.Group>
+        )
       )}
-      {q.kind === 'multi_choice' && (
-        <Checkbox.Group value={multi} onChange={v => setMulti(v as string[])} direction='vertical' disabled={!!outcome}>
-          {(q.options ?? []).map((opt, i) => (
-            <Checkbox key={i} value={String.fromCharCode(65 + i)}>{String.fromCharCode(65 + i)}. {opt}</Checkbox>
-          ))}
-        </Checkbox.Group>
-      )}
-      {q.kind === 'true_false' && !outcome && (
-        <Radio.Group value={choice} onChange={v => setChoice(v)}>
-          <Radio value='T'>正确</Radio>
-          <Radio value='F'>错误</Radio>
-        </Radio.Group>
-      )}
-      {q.kind === 'fill_in_blank' && (
+      {textKind && (
         <Input.TextArea
-          value={text} onChange={setText} placeholder='输入答案'
-          autoSize={{ minRows: 1, maxRows: 4 }} disabled={!!outcome} />
+          value={text} onChange={setText}
+          placeholder={q.kind === 'reflection' ? '写下你的回答（AI 按评分要点判卷）' : '输入答案'}
+          autoSize={{ minRows: 1, maxRows: 6 }} disabled={!!outcome} />
       )}
 
       {!outcome ? (
@@ -112,9 +99,9 @@ export default function QuestionCard(props: {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {outcome.correct === true && <Tag color='green'>答对了</Tag>}
             {outcome.correct === false && <Tag color='red'>答错了</Tag>}
-            {outcome.correct === null && outcome.correct !== undefined && <Tag>已记录</Tag>}
+            {outcome.correct === null && <Tag>已记录</Tag>}
             <Text type='secondary' style={{ fontSize: 12 }}>判卷：{outcome.judge}</Text>
-            <Button size='mini' type='text' onClick={redo}>重新提交</Button>
+            <Button size='mini' type='text' onClick={redo}>再做一次</Button>
           </div>
           {outcome.feedback && (
             <div style={{

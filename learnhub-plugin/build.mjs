@@ -17,7 +17,9 @@ mkdirSync(join(here, 'lib'), { recursive: true })
 
 /** 面板 SPA 构建（ui/ → web/dist）：host 直接伺服产物，必须先于 lib 构建。
  * node_modules 缺失（干净克隆）时自动补 npm install。
- * Windows 工作副本是 CRLF，vite 会原样带进文本产物 → 统一 LF（whitespace 门禁）。 */
+ * Windows 工作副本是 CRLF，vite 会原样带进文本产物 → 统一 LF；
+ * mermaid 等 minified 产物的行尾空白（CSS 声明 / SVG path 分隔符）会挂
+ * whitespace 门禁 → 一并清除（均为渲染等价改动，不影响求值语义）。 */
 function buildUi() {
   const uiDir = join(here, 'ui')
   if (!existsSync(join(uiDir, 'node_modules'))) {
@@ -32,7 +34,8 @@ function buildUi() {
       if (entry.isDirectory()) walk(p)
       else if (/\.(html|js|mjs|css|map|json|svg)$/.test(entry.name)) {
         const text = readFileSync(p, 'utf8')
-        if (text.includes('\r')) writeFileSync(p, text.replace(/\r\n/g, '\n'), 'utf8')
+        const cleaned = text.replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, '')
+        if (cleaned !== text) writeFileSync(p, cleaned, 'utf8')
       }
     }
   }
