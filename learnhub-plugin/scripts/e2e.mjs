@@ -132,6 +132,14 @@ async function run() {
     const q1 = bank.questions.find(q => q.id === 'q1')
     assert(q1.fsrs?.reps === 1 && q1.stats?.attempts === 1 && q1.stats.correct === 1, 'question fsrs/stats not written')
   })
+  await step('questionAnswer 同日重刷不推进调度', async () => {
+    const r = await engine.questionAnswer(async () => { throw new Error('no llm') }, courseName, noteName, 'q1', 'A')
+    assert(r.scheduled === false, `scheduled=${r.scheduled}（同日重刷应仅记统计）`)
+    const bank = await engine.bank.load(engine.paths.courseRoot(courseRoot), noteName)
+    const q1 = bank.questions.find(q => q.id === 'q1')
+    assert(q1.fsrs?.reps === 1, `reps=${q1.fsrs?.reps}（同日重刷不应推进）`)
+    assert(q1.stats?.attempts === 2, `attempts=${q1.stats?.attempts}`)
+  })
   await step('questionAnswer 错误(fill_in_blank)', async () => {
     const r = await engine.questionAnswer(async () => { throw new Error('should not call llm') }, courseName, noteName, 'q2', '1')
     assert(r.correct === false, 'expected wrong answer')
@@ -140,8 +148,8 @@ async function run() {
   await step('practice 证据落盘（frontmatter EMA + JSONL + stage→learning）', async () => {
     const { state } = await engine.loadView({ name: courseName, root: courseRoot })
     const fm = state[noteName]
-    assert(fm.practice.attempts === 2, `attempts=${fm.practice.attempts}`)
-    assert(fm.practice.correct === 1, `correct=${fm.practice.correct}`)
+    assert(fm.practice.attempts === 3, `attempts=${fm.practice.attempts}（q1×2 + q2×1，同日重刷也计入练习统计）`)
+    assert(fm.practice.correct === 2, `correct=${fm.practice.correct}`)
     assert(fm.stage === 'learning', `stage=${fm.stage}（首答应推进 learning）`)
     const practiceTxt = readFileSync(join(dstCenter, 'state', 'practice.jsonl'), 'utf8')
     assert(practiceTxt.includes('"qid":"q1"'), 'practice jsonl missing qid')

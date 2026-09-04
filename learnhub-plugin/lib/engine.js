@@ -12254,9 +12254,14 @@ ${String(q.answer)}`,
         await this.content.onStageChange(c.root, graph, stateNow, node, next.stage);
       }
     }
-    const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
     const today = todayStr();
-    const { fs } = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched);
+    let fs;
+    if (q.stats?.last === today && q.fsrs?.reps) {
+      fs = q.fsrs;
+    } else {
+      const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
+      fs = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched).fs;
+    }
     const stats = {
       attempts: (q.stats?.attempts ?? 0) + 1,
       correct: (q.stats?.correct ?? 0) + (correct ? 1 : 0),
@@ -12273,7 +12278,9 @@ ${String(q.answer)}`,
       answer: q.kind === "true_false" ? q.answer : q.kind === "single_choice" ? q.answer : q.kind === "fill_in_blank" ? Array.isArray(q.answer) ? q.answer.join(" / ") : q.answer : String(q.answer),
       kind: q.kind,
       due: fs.due,
-      mastery
+      mastery,
+      // 本次作答是否推进了该题 FSRS 调度（每题每天至多一次）
+      scheduled: fs !== q.fsrs
     };
   }
   /** 节点掌握度 = 该节点全部题目的作答正确率汇总（Σcorrect/Σattempts；无作答 → 0）。 */

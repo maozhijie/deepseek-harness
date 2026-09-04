@@ -38,9 +38,9 @@ export default function LessonView(props: { course: string; node: string; frame:
   const [reloadTick, setReloadTick] = useState(0)
   const jobRef = useRef<GenJobItem | null>(null)
 
-  const refresh = useCallback(async () => {
-    setSections(null)
-    setQuestions(null)
+  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
+    // silent：作答后的统计刷新——保留旧内容直接覆盖，不闪 Spin（提交不整页刷新）
+    if (!opts?.silent) { setSections(null); setQuestions(null) }
     try {
       const [lesson, bank] = await Promise.all([
         api.lesson(node, course).catch(() => null),
@@ -260,7 +260,7 @@ export default function LessonView(props: { course: string; node: string; frame:
                     </Text>
                   )}
                   <QuestionCard course={course} node={node} question={q}
-                    onDone={() => void refresh()} />
+                    onDone={() => void refresh({ silent: true })} />
                 </div>
               ))}
             </Space>

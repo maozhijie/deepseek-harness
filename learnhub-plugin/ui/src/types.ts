@@ -119,7 +119,8 @@ export interface GenJobItem {
 export interface QueueItem { course: string; node: string; kind: string; reason: string; priority: string }
 export interface DoctorDoc { problems: Array<{ level: string; message: string }> }
 
-/** 作答判卷结果（question-answer；含该题新到期日与节点聚合掌握度）。 */
+/** 作答判卷结果（question-answer；含该题新到期日与节点聚合掌握度）。
+ * scheduled=false 表示该题今日已推进过调度，本次仅记录练习统计。 */
 export interface AnswerResult {
   correct?: boolean | null
   judge: string
@@ -127,4 +128,5 @@ export interface AnswerResult {
   message?: string
   due?: string
   mastery?: number
+  scheduled?: boolean
 }

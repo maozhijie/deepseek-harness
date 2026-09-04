@@ -42,6 +42,9 @@ export default function QuestionCard(props: {
         : textKind ? text.trim()
           : choice
       const res = await api.questionAnswer(props.course, props.node, q.id, answer)
+      if (res.scheduled === false) {
+        Message.info('该题今日已推进过复习调度，本次仅记录练习统计')
+      }
       const oc: AnswerOutcome = { correct: res.correct ?? null, judge: res.judge, feedback: res.feedback }
       setOutcome(oc)
       props.onDone?.(oc)

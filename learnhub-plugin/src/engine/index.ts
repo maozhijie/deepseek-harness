@@ -427,10 +427,17 @@ export class LearnhubEngine {
         await this.content.onStageChange(c.root, graph, stateNow, node, next.stage)
       }
     }
-    // 题目级 FSRS：作答对错映射 rating（对=3、错=1）推进该题调度并写回题库
-    const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root))
+    // 题目级 FSRS：作答对错映射 rating（对=3、错=1）推进该题调度并写回题库。
+    // 每题每天至多推进一次：同日重复作答（「再做一次」）只记练习统计，
+    // 不再碰调度卡——避免反复刷同一题把 reps/stability/due 推到失真位置。
     const today = todayStr()
-    const { fs } = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched)
+    let fs: FsrsBlock
+    if (q.stats?.last === today && q.fsrs?.reps) {
+      fs = q.fsrs
+    } else {
+      const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root))
+      fs = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched).fs
+    }
     const stats = {
       attempts: (q.stats?.attempts ?? 0) + 1,
       correct: (q.stats?.correct ?? 0) + (correct ? 1 : 0),
@@ -448,6 +455,8 @@ export class LearnhubEngine {
       kind: q.kind,
       due: fs.due,
       mastery,
+      // 本次作答是否推进了该题 FSRS 调度（每题每天至多一次）
+      scheduled: fs !== q.fsrs,
     }
   }
 
