@@ -107,6 +107,8 @@ export interface GenJobItem {
   node: string
   startedAt: string
   status: 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+  /** 组合管线阶段：content（正文）→ quiz（自动出题）。 */
+  phase?: 'content' | 'quiz'
   message?: string
 }
 

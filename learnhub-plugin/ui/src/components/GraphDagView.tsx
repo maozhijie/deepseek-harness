@@ -13,12 +13,14 @@ import {
   MiniMap,
   Position,
   ReactFlow,
+  ReactFlowProvider,
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import React, { useMemo } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { GraphDoc, Stage } from '../types'
 
 const NODE_WIDTH = 148
@@ -45,21 +47,26 @@ interface DagNodeData extends Record<string, unknown> {
   recommended: boolean
   locked: boolean
   hasBank: boolean
+  focused: boolean
 }
 type DagNode = Node<DagNodeData, 'dagNode'>
 
-/** 节点卡片：左侧状态色条 + 标题 + 层级/区/题库元信息；推荐琥珀描边、锁定半透明虚线。 */
+/** 节点卡片：左侧状态色条 + 标题 + 层级/区/题库元信息；推荐琥珀描边、定位红描边、锁定半透明虚线。 */
 const DagNodeInner: React.FC<NodeProps<DagNode>> = ({ data }) => {
-  const accent = data.recommended
-    ? 'var(--color-warning-6, #ff7d00)'
-    : data.locked
-      ? 'var(--color-text-4, #c9cdd4)'
-      : STAGE_COLOR[data.stage]
-  const border = data.recommended
-    ? '1px solid var(--color-warning-6, #ff7d00)'
-    : data.locked
-      ? '1px dashed var(--color-border-2, #e5e6eb)'
-      : '1px solid var(--color-border-2, #e5e6eb)'
+  const accent = data.focused
+    ? 'var(--color-danger-6, #f53f3f)'
+    : data.recommended
+      ? 'var(--color-warning-6, #ff7d00)'
+      : data.locked
+        ? 'var(--color-text-4, #c9cdd4)'
+        : STAGE_COLOR[data.stage]
+  const border = data.focused
+    ? '2px solid var(--color-danger-6, #f53f3f)'
+    : data.recommended
+      ? '1px solid var(--color-warning-6, #ff7d00)'
+      : data.locked
+        ? '1px dashed var(--color-border-2, #e5e6eb)'
+        : '1px solid var(--color-border-2, #e5e6eb)'
   const bg = data.stage === 'review' || data.stage === 'mastered'
     ? 'var(--color-success-light-1, #e8ffea)'
     : data.stage === 'learning' || data.stage === 'ready'
@@ -103,7 +110,7 @@ const NODE_TYPES = { dagNode: DagNodeInner }
 
 /** dagre BT 分层：前置沉底、目标升至顶层。节点必须显式携带 width/height，
  * 否则 0×0 不可见、边端点错位、MiniMap 无矩形。 */
-function layoutDag(doc: GraphDoc, lockedIds: Set<string>, recommendedSet: Set<string>, bankSet: Set<string>) {
+function layoutDag(doc: GraphDoc, lockedIds: Set<string>, recommendedSet: Set<string>, bankSet: Set<string>, focusNode: string | null) {
   const g = new Graph()
   g.setDefaultEdgeLabel(() => ({}))
   g.setGraph({ rankdir: 'BT', nodesep: 16, ranksep: 40, marginx: 24, marginy: 24 })
@@ -122,7 +129,7 @@ function layoutDag(doc: GraphDoc, lockedIds: Set<string>, recommendedSet: Set<st
       data: {
         title: n.data.id, depth: n.data.depth, stage: n.data.stage, region: n.data.region,
         recommended: recommendedSet.has(n.data.id), locked: lockedIds.has(n.data.id),
-        hasBank: bankSet.has(n.data.id),
+        hasBank: bankSet.has(n.data.id), focused: n.data.id === focusNode,
       },
     }
   })
@@ -152,6 +159,8 @@ interface GraphDagViewProps {
   lockedIds: Set<string>
   /** 有题库的节点（元信息行显示「题」）。 */
   bankSet: Set<string>
+  /** 定位目标：红描边高亮并把画布居中到该节点（「在图中查看」跳转）。 */
+  focusNode?: string | null
   onSelect: (nodeId: string) => void
 }
 
@@ -159,12 +168,27 @@ interface GraphDagViewProps {
  * >300 开启裁剪保 500 节点级流畅。key 绑节点数：图结构变化时重挂载重新 fitView。 */
 const VIEWPORT_CULL_THRESHOLD = 300
 
-const GraphDagView: React.FC<GraphDagViewProps> = ({ doc, recommended, lockedIds, bankSet, onSelect }) => {
+const GraphDagViewInner: React.FC<GraphDagViewProps> = ({ doc, recommended, lockedIds, bankSet, focusNode, onSelect }) => {
   const recommendedSet = useMemo(() => new Set(recommended), [recommended])
   const { flowNodes, flowEdges } = useMemo(
-    () => layoutDag(doc, lockedIds, recommendedSet, bankSet),
-    [doc, lockedIds, recommendedSet, bankSet],
+    () => layoutDag(doc, lockedIds, recommendedSet, bankSet, focusNode ?? null),
+    [doc, lockedIds, recommendedSet, bankSet, focusNode],
   )
+  // 定位：React Flow init 完成（含 fitView）之前调用 setCenter 会被初始视口覆盖，
+  // 因此挂载路径走 onInit，已就绪路径走 effect，都指到 focusNode 中心。
+  const instanceRef = useRef<ReactFlowInstance<DagNode, Edge> | null>(null)
+  const focus = useCallback((inst: ReactFlowInstance<DagNode, Edge>) => {
+    if (!focusNode) return
+    const hit = inst.getNodes().find(n => n.id === focusNode)
+    if (hit) inst.setCenter(hit.position.x + NODE_WIDTH / 2, hit.position.y + NODE_HEIGHT / 2, { zoom: 0.9, duration: 400 })
+  }, [focusNode])
+  const handleInit = useCallback((inst: ReactFlowInstance<DagNode, Edge>) => {
+    instanceRef.current = inst
+    focus(inst)
+  }, [focus])
+  useEffect(() => {
+    if (instanceRef.current) focus(instanceRef.current)
+  }, [focus])
   return (
     <div className='dag-wrap'>
       <ReactFlow
@@ -181,6 +205,7 @@ const GraphDagView: React.FC<GraphDagViewProps> = ({ doc, recommended, lockedIds
         nodesConnectable={false}
         elementsSelectable
         onNodeClick={(_, node) => onSelect(node.id)}
+        onInit={handleInit}
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1.2} color='var(--color-fill-2, #f2f3f5)' />
@@ -197,5 +222,12 @@ const GraphDagView: React.FC<GraphDagViewProps> = ({ doc, recommended, lockedIds
     </div>
   )
 }
+
+/** useReactFlow 要求 Provider 祖先：外层包 Provider，内层用 hook 做定位/fitView。 */
+const GraphDagView: React.FC<GraphDagViewProps> = props => (
+  <ReactFlowProvider>
+    <GraphDagViewInner {...props} />
+  </ReactFlowProvider>
+)
 
 export default GraphDagView

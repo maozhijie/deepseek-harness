@@ -56,6 +56,8 @@ export const api = {
   grade: (course: string, node: string, rating: number) =>
     http<{ message: string }>('POST', '/grade', { course, node, rating }),
   generate: (course: string, node: string) => http<{ message: string }>('POST', '/generate', { course, node }),
+  questionGenerate: (course: string, node: string, count = 6) =>
+    http<{ course: string; node: string; added: number; total: number }>('POST', '/question-generate', { course, node, count }),
   generateStatus: () => http<import('./types').GenJobItem[]>('GET', '/generate/status'),
   generateCancel: (course: string, node: string) =>
     http<{ cancelled: boolean; status?: string }>('POST', '/generate/cancel', { course, node }),

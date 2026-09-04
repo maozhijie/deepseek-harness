@@ -1,174 +1,162 @@
-/** 学习图工作区（重点页面）：DAG 主视图 + 大纲树切换 + 就绪推荐 + 节点抽屉。
- * 移植自 allo LearningGraphWorkspace 的编排，数据源换 learnhub 引擎。 */
-import { Button, Collapse, Message, Radio, Select, Space, Spin, Tag, Tooltip, Typography } from '@arco-design/web-react'
+/** 图页 = 全局总览（低频）：DAG 纵览 + 区过滤/搜索/只看就绪 + 推荐星标。
+ * 点节点直接进学习视图（LessonView）；从学习视图「在图中查看」跳入时
+ * focusNode 红描边定位。图本身不承载学习操作。 */
+import { Button, Card, Input, Select, Space, Switch, Tag, Typography } from '@arco-design/web-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import GraphDagView from '../components/GraphDagView'
-import NodeDrawer from '../components/NodeDrawer'
 import { api } from '../api'
 import type { AppFrame } from '../App'
-import type { GraphDoc, RecommendDoc, Stage } from '../types'
+import type { BankEntry, GraphDoc, RecommendDoc } from '../types'
 
 const { Text } = Typography
 
-/** 锁定语义：存在任一前置未达 review/mastered（前置线由 edges 反查）。 */
-function computeLocked(doc: GraphDoc, stageOf: Map<string, Stage>): Set<string> {
-  const pre = new Map<string, string[]>()
-  for (const e of doc.edges) {
-    const list = pre.get(e.data.target) ?? []
-    list.push(e.data.source)
-    pre.set(e.data.target, list)
-  }
-  const locked = new Set<string>()
-  for (const n of doc.nodes) {
-    const ups = pre.get(n.data.id) ?? []
-    if (ups.length && ups.some(id => {
-      const s = stageOf.get(id) ?? 'unseen'
-      return s !== 'review' && s !== 'mastered'
-    })) locked.add(n.data.id)
-  }
-  return locked
-}
-
-const REC_TYPE: Record<string, { label: string; color: string }> = {
-  review: { label: '复习', color: 'green' },
-  overdue: { label: '逾期', color: 'red' },
-  ready: { label: '就绪', color: 'blue' },
-  new: { label: '新学', color: 'cyan' },
-}
+const REC_TYPE_COLOR: Record<string, string> = { review: 'green', overdue: 'red', ready: 'blue', new: 'cyan' }
+const REC_TYPE_LABEL: Record<string, string> = { review: '复习', overdue: '逾期', ready: '就绪', new: '新学' }
 
 export default function GraphPage({ frame }: { frame: AppFrame }) {
-  const { tree, course } = frame
-  const [view, setView] = useState<'dag' | 'outline'>('dag')
+  const course = frame.course
   const [doc, setDoc] = useState<GraphDoc | null>(null)
+  const [banks, setBanks] = useState<BankEntry[] | null>(null)
   const [rec, setRec] = useState<RecommendDoc | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [selected, setSelected] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  // 总览过滤
+  const [region, setRegion] = useState<string>('')
+  const [search, setSearch] = useState('')
+  const [readyOnly, setReadyOnly] = useState(false)
 
-  const loadGraph = useCallback(async () => {
-    if (!course) return
+  const load = useCallback(async () => {
+    if (!course) { setDoc(null); return }
     setLoading(true)
     try {
-      const [g, r] = await Promise.all([
-        api.graph(course),
-        api.recommend(8).catch(() => null),
+      const [g, b, r] = await Promise.all([
+        api.graph(course).catch(() => null),
+        api.questionsAll(course).catch(() => ({ total: 0, questions: [] as BankEntry[] })),
+        api.recommend(30).catch(() => ({ events: [] as RecommendDoc['events'] })),
       ])
       setDoc(g)
-      setRec(r)
-    } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err))
+      setBanks(b.questions)
+      setRec(r as RecommendDoc)
     } finally {
       setLoading(false)
     }
   }, [course])
 
-  useEffect(() => { void loadGraph() }, [loadGraph])
+  useEffect(() => { void load() }, [load])
 
-  const stageOf = useMemo(() => {
-    const m = new Map<string, Stage>()
-    for (const n of doc?.nodes ?? []) m.set(n.data.id, n.data.stage)
-    return m
-  }, [doc])
-  const lockedIds = useMemo(() => (doc ? computeLocked(doc, stageOf) : new Set<string>()), [doc, stageOf])
-  const recommended = useMemo(() => (rec?.events ?? []).map(e => e.node), [rec])
-  const bankSet = useMemo(() => {
-    const s = new Set<string>()
-    const c = tree?.courses.find(c => c.name === course)
-    for (const r of c?.regions ?? []) for (const b of r.blocks) for (const n of b.nodes) {
-      if (n.hasBank) s.add(n.node)
+  // 过滤：裁出子图（端点不在集合内的边一并裁掉）
+  const filtered = useMemo(() => {
+    if (!doc) return null
+    const keep = (id: string) => {
+      if (region && !(doc.nodes.find(n => n.data.id === id)?.data.region === region)) return false
+      if (readyOnly) {
+        const n = doc.nodes.find(x => x.data.id === id)
+        if (!n || (n.data.stage !== 'ready' && n.data.stage !== 'learning')) return false
+      }
+      if (search && !id.includes(search.trim())) return false
+      return true
     }
-    return s
-  }, [tree, course])
+    const nodes = doc.nodes.filter(n => keep(n.data.id))
+    const ids = new Set(nodes.map(n => n.data.id))
+    const edges = doc.edges.filter(e => ids.has(e.data.source) && ids.has(e.data.target))
+    return { ...doc, nodes, edges }
+  }, [doc, region, search, readyOnly])
 
-  const stats = useMemo(() => {
-    const counts: Record<Stage, number> = { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0 }
-    for (const n of doc?.nodes ?? []) counts[n.data.stage] += 1
-    return counts
-  }, [doc])
+  const computeLocked = useCallback((g: GraphDoc) => {
+    const stageOf = new Map(g.nodes.map(n => [n.data.id, n.data.stage] as const))
+    const ups = new Map<string, string[]>()
+    for (const e of g.edges) {
+      const arr = ups.get(e.data.target) ?? []
+      arr.push(e.data.source)
+      ups.set(e.data.target, arr)
+    }
+    const locked = new Set<string>()
+    for (const n of g.nodes) {
+      const upsOf = ups.get(n.data.id) ?? []
+      if (upsOf.some(id => {
+        const s = stageOf.get(id) ?? 'unseen'
+        return s !== 'review' && s !== 'mastered'
+      })) locked.add(n.data.id)
+    }
+    return locked
+  }, [])
 
-  const treeCourse = tree?.courses.find(c => c.name === course)
+  const lockedIds = useMemo(() => (doc ? computeLocked(doc) : new Set<string>()), [doc, computeLocked])
+  const recommended = useMemo(
+    () => (rec?.events ?? []).filter(e => e.course === course).map(e => e.node),
+    [rec, course],
+  )
+  const bankSet = useMemo(() => new Set(banks?.map(b => b.node) ?? []), [banks])
+  const regions = useMemo(
+    () => [...new Set(doc?.nodes.map(n => n.data.region) ?? [])].sort(),
+    [doc],
+  )
 
-  if (!course || !treeCourse || !tree) return null
-  const drawerNode = selected !== null ? stageOf.get(selected) : undefined
+  const onSelect = (nodeId: string) => {
+    if (!course) return
+    frame.openLesson(course, nodeId)
+  }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '10px 12px 0' }}>
-        <Select value={course} onChange={v => frame.setCourse(v)} style={{ width: 220 }} size='small'>
-          {tree.courses.map(c => <Select.Option key={c.name} value={c.name}>{c.name}</Select.Option>)}
-        </Select>
-        <Radio.Group type='button' size='small' value={view} onChange={v => setView(v as 'dag' | 'outline')}>
-          <Radio value='dag'>依赖图</Radio>
-          <Radio value='outline'>大纲</Radio>
-        </Radio.Group>
-        <Space size={4} wrap>
-          <Tag size='small'>共 {doc?.nodes.length ?? 0}</Tag>
-          <Tag size='small' color='green'>掌握 {stats.mastered + stats.review}</Tag>
-          <Tag size='small' color='arcoblue'>进行 {stats.learning + stats.ready}</Tag>
-          <Tag size='small' color='gray'>未学 {stats.unseen}</Tag>
+  if (!course) {
+    return <Card><Text type='secondary'>在「学习」页选择课程后查看学习图。</Text></Card>
+  }
+  if (loading && !doc) {
+    return <Card><Text type='secondary'>加载学习图…</Text></Card>
+  }
+  if (!doc || !filtered) {
+    return (
+      <Card>
+        <Space direction='vertical'>
+          <Text type='secondary'>课程「{course}」还没有学习图。</Text>
+          <Button onClick={() => frame.goto('generate')}>去生成页处理</Button>
         </Space>
-        <Button size='small' onClick={() => void loadGraph()} loading={loading}>刷新</Button>
-      </div>
+      </Card>
+    )
+  }
 
-      {/* 就绪推荐条 */}
-      {rec && rec.events.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '0 12px' }}>
-          {rec.events.map((e, i) => {
-            const t = REC_TYPE[e.type] ?? { label: e.type, color: 'gray' }
-            return (
-              <Button key={i} size='mini' onClick={() => setSelected(e.node)}
-                style={{ justifyContent: 'flex-start' }}>
-                <Tag size='small' color={t.color} style={{ marginRight: 6 }}>{t.label}</Tag>
-                <span style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {e.node}
-                </span>
-              </Button>
-            )
-          })}
+  const s = { nodes: doc.nodes.length, edges: doc.edges.length }
+  return (
+    <Space direction='vertical' style={{ width: '100%' }} size={12}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <Typography.Title heading={4} style={{ margin: 0 }}>{course} · 学习图</Typography.Title>
+        <Space size={4} wrap>
+          <Tag size='small'>{s.nodes} 节点</Tag>
+          <Tag size='small'>{s.edges} 依赖</Tag>
+          <Tag size='small'>{bankSet.size} 有题库</Tag>
+          <Tag size='small' color='gray'>全局总览 · 点节点进入学习</Tag>
+        </Space>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Select
+            size='small' placeholder='全区' style={{ width: 160 }} allowClear
+            value={region || undefined} onChange={v => setRegion(v ?? '')}
+            options={regions.map(r => ({ label: r, value: r }))} />
+          <Input.Search size='small' placeholder='搜索节点名' style={{ width: 180 }}
+            value={search} onChange={setSearch} allowClear />
+          <Space size={6}>
+            <Text style={{ fontSize: 12 }} type='secondary'>只看进行中</Text>
+            <Switch size='small' checked={readyOnly} onChange={setReadyOnly} />
+          </Space>
+          <Button size='small' loading={loading} onClick={() => void load()}>刷新</Button>
         </div>
-      )}
-
-      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {loading && !doc ? (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Spin dot />
-          </div>
-        ) : view === 'dag' ? (
-          doc && <GraphDagView doc={doc} recommended={recommended} lockedIds={lockedIds} bankSet={bankSet}
-            onSelect={id => setSelected(id)} />
-        ) : (
-          <div style={{ height: '100%', overflow: 'auto', padding: '8px 12px 24px' }}>
-            <Collapse bordered={false} defaultActiveKey={treeCourse.regions.map((_, i) => String(i))}>
-              {treeCourse.regions.map((r, i) => (
-                <Collapse.Item key={String(i)} name={String(i)}
-                  header={<Space size={8}><span style={{ width: 8, height: 8, borderRadius: 4, background: r.color, display: 'inline-block' }} />{r.name}</Space>}>
-                  {r.blocks.map(b => (
-                    <div key={b.name} style={{ marginBottom: 8 }}>
-                      <Text bold style={{ display: 'block', margin: '6px 0 4px' }}>{b.name}</Text>
-                      <Space size={6} wrap>
-                        {b.nodes.map(n => (
-                          <Tooltip key={n.node} content={`${n.stage} · 掌握度 ${(n.mastery * 100).toFixed(0)}%`}>
-                            <Button size='mini' onClick={() => setSelected(n.node)}
-                              disabled={n.stage === 'unseen' && b.nodes.length > 0 && false}>
-                              {n.node}
-                              {n.hasBank ? ' ·题' : ''}
-                            </Button>
-                          </Tooltip>
-                        ))}
-                      </Space>
-                    </div>
-                  ))}
-                </Collapse.Item>
-              ))}
-            </Collapse>
-          </div>
-        )}
       </div>
 
-      {selected && drawerNode && (
-        <NodeDrawer course={course} node={selected} stage={drawerNode} open
-          onClose={() => setSelected(null)}
-          onRefresh={async () => { await Promise.all([loadGraph(), frame.reload()]) }} />
+      {/* 推荐条（琥珀=下一步推荐；点击卡片直接进学习视图） */}
+      {(rec?.events ?? []).filter(e => e.course === course).length > 0 && (
+        <Space size={6} wrap>
+          {(rec?.events ?? []).filter(e => e.course === course).slice(0, 8).map((e, i) => (
+            <Tag key={i} color={REC_TYPE_COLOR[e.type] ?? 'gray'}
+              style={{ cursor: 'pointer' }}
+              onClick={() => frame.openLesson(e.course, e.node)}>
+              {e.node}（{REC_TYPE_LABEL[e.type] ?? e.type}）
+            </Tag>
+          ))}
+        </Space>
       )}
-    </div>
+
+      <div className='dag-wrap'>
+        <GraphDagView
+          key={course} doc={filtered} recommended={recommended} lockedIds={lockedIds}
+          bankSet={bankSet} focusNode={frame.focusNode} onSelect={onSelect} />
+      </div>
+    </Space>
   )
 }

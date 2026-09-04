@@ -1,11 +1,13 @@
-/** 学习页（默认首屏）：打卡横幅 + 就绪推荐 + 课程卡网格 + 复习会话。
- * 移植 allo 学习页编排（ReviewBanner/CourseCard/ReviewSession），
- * 复习语义映射 learnhub：作答对→rating3、错/忘→rating1，自评 1-4，跳过不落分。 */
+/** 学习页（主界面）：打卡横幅 + 「接下来学/复习」推荐流（点开直接进 LessonView）
+ * + 课程卡（次要区）。二级视图 LessonView 承载正文/做题/自评（最大最丰富）。
+ * 移植 allo 学习页编排，复习语义映射 learnhub：作答对→rating3、错→rating1，
+ * 自评 1-4，跳过不落分。 */
 import {
   Alert, Button, Card, Drawer, Empty, Input, Message, Modal, Progress, Space,
   Tag, Typography,
 } from '@arco-design/web-react'
 import { useCallback, useEffect, useState } from 'react'
+import LessonView from '../components/LessonView'
 import QuestionCard from '../components/QuestionCard'
 import { api } from '../api'
 import type { AppFrame } from '../App'
@@ -18,7 +20,14 @@ const RATING_BTNS: Array<{ rating: number; label: string }> = [
   { rating: 3, label: '良好' }, { rating: 4, label: '简单' },
 ]
 
-/** 打卡横幅：今日行为计数 + 近 14 日迷你热力 + 开始复习。 */
+const REC_TYPE: Record<string, { label: string; color: string; order: number }> = {
+  overdue: { label: '逾期', color: 'red', order: 0 },
+  review: { label: '复习', color: 'green', order: 1 },
+  ready: { label: '就绪', color: 'blue', order: 2 },
+  new: { label: '新学', color: 'cyan', order: 3 },
+}
+
+/** 打卡横幅：今日行为计数 + 开始复习。 */
 function CheckinBanner({ checkin, dueCount, onStart }: {
   checkin: CheckinDoc | null
   dueCount: number
@@ -49,13 +58,33 @@ function CheckinBanner({ checkin, dueCount, onStart }: {
   )
 }
 
-/** 课程卡：进度 + 五态计数 + 操作（打开学习图 / 复习 / 标签 / 删除）。 */
+/** 推荐流大卡片：点开直接进 LessonView——主界面的核心动作。 */
+function RecCard({ e, onOpen }: { e: RecEvent; onOpen: () => void }) {
+  const t = REC_TYPE[e.type] ?? { label: e.type, color: 'gray', order: 9 }
+  return (
+    <Card size='small' hoverable style={{ borderRadius: 10, cursor: 'pointer', borderLeft: `3px solid var(--color-${t.color === 'red' ? 'danger' : t.color === 'green' ? 'success' : 'primary'}-6,#165dff)` }}>
+      <div onClick={onOpen} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <Tag color={t.color}>{t.label}</Tag>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <Title heading={6} style={{ margin: 0 }}>{e.node}</Title>
+          <Text type='secondary' style={{ fontSize: 12 }}>
+            {e.course}{e.region ? ` · ${e.region}` : ''}{e.why ? ` · ${e.why}` : ''}
+          </Text>
+        </div>
+        <Button size='mini' type='primary' onClick={ev => { ev.stopPropagation(); onOpen() }}>
+          {e.type === 'review' || e.type === 'overdue' ? '去复习' : '去学习'}
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
+/** 课程卡（次要区）：进度 + 打开图/复习/标签/删除。 */
 function CourseCard(props: {
   name: string
   counts: { unseen: number; ready: number; learning: number; review: number; mastered: number }
   total: number
   due: number
-  tags: string[]
   onOpen: () => void
   onReview: () => void
   onTags: () => void
@@ -75,13 +104,8 @@ function CourseCard(props: {
           <Tag size='small' color='green'>掌握 {props.counts.mastered}</Tag>
           {props.due > 0 && <Tag size='small' color='red'>到期 {props.due}</Tag>}
         </Space>
-        {props.tags.length > 0 && (
-          <Space size={4} wrap>
-            {props.tags.map(t => <Tag key={t} size='small' color='purple'>{t}</Tag>)}
-          </Space>
-        )}
         <Space size={6}>
-          <Button size='mini' type='primary' onClick={props.onOpen}>打开学习图</Button>
+          <Button size='mini' onClick={props.onOpen}>打开图</Button>
           <Button size='mini' onClick={props.onReview}>复习</Button>
           <Button size='mini' type='text' onClick={props.onTags}>标签</Button>
           <Button size='mini' type='text' status='danger' onClick={props.onDelete}>删除</Button>
@@ -130,7 +154,6 @@ function ReviewSession(props: {
   }
 
   const onAnswered = async (o: { correct: boolean | null; judge: string; feedback?: string }) => {
-    // 判卷落地：对→良好(3)、错→忘了(1)、无法判卷→不落分留给自评
     if (o.correct === true) await rate(3)
     else if (o.correct === false) await rate(1)
   }
@@ -154,7 +177,7 @@ function ReviewSession(props: {
           : questions.length > 0 ? (
             questions.map(q => (
               <QuestionCard key={q.id} course={item.course} node={item.node} question={q}
-                onDone={correct => void onAnswered(correct)} />
+                onDone={o => void onAnswered(o)} />
             ))
           ) : (
             <Alert type='info' content='该节点没有题库：按回忆质量自评（1 忘了 ~ 4 简单）' />
@@ -219,7 +242,7 @@ function CreateDialog(props: { visible: boolean; onClose: () => void }) {
           value='用 learnhub-graph-generate 技能，为我生成课程「<主题>」，起点：<已有基础>，目标：<学会什么>'
           readOnly autoSize={{ minRows: 3, maxRows: 4 }} />
         <Text type='secondary' style={{ fontSize: 12 }}>
-          提案生成后回到本面板「提案」页签审阅应用；节点正文用学习图页签的「AI 生成正文」。
+          提案生成后回到本面板「提案」页签审阅应用；在推荐流里点开节点即可「生成正文（自动出题）」。
         </Text>
       </Space>
     </Modal>
@@ -238,7 +261,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
   const load = useCallback(async () => {
     const [c, r, t] = await Promise.all([
       api.checkinToday().catch(() => null),
-      api.recommend(8).catch(() => null),
+      api.recommend(12).catch(() => null),
       api.tags().catch(() => []),
     ])
     setCheckin(c)
@@ -247,7 +270,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
   }, [])
 
   useEffect(() => { void load() }, [load])
-  // 后台生成悬浮指示条（allo CourseGenerationPill 同语义）：有 running 任务时出现
+  // 后台生成悬浮指示条（allo CourseGenerationPill 同语义）
   useEffect(() => {
     const poll = async () => {
       try {
@@ -268,6 +291,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
   }, [frame, load])
 
   const reviewQueue = (rec?.events ?? []).filter(e => e.type === 'review' || e.type === 'overdue')
+  const learnEvents = (rec?.events ?? []).filter(e => e.type !== 'review' && e.type !== 'overdue')
 
   const deleteCourse = (name: string) => {
     Modal.confirm({
@@ -285,6 +309,11 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
     })
   }
 
+  // 二级视图：节点学习（最大最丰富）
+  if (frame.lesson) {
+    return <LessonView course={frame.lesson.course} node={frame.lesson.node} frame={frame} />
+  }
+
   return (
     <Space direction='vertical' style={{ width: '100%' }} size={14}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -296,17 +325,31 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
       <CheckinBanner checkin={checkin} dueCount={reviewQueue.length}
         onStart={() => setSession(reviewQueue)} />
 
+      {/* 核心区：「接下来学/复习」推荐流——点开直接进学习视图 */}
       {frame.tree && frame.tree.courses.length === 0 ? (
         <Empty description='还没有课程。点右上角「生成新课程」看引导，然后在 dsh 对话里让 agent 按技能建课。' />
+      ) : (rec && (reviewQueue.length + learnEvents.length) > 0 ? (
+        <Card size='small' title='接下来' style={{ borderRadius: 10 }}>
+          <Space direction='vertical' style={{ width: '100%' }} size={10}>
+            {[...reviewQueue, ...learnEvents].sort((a, b) =>
+              (REC_TYPE[a.type]?.order ?? 9) - (REC_TYPE[b.type]?.order ?? 9)).map((e, i) => (
+                <RecCard key={i} e={e} onOpen={() => frame.openLesson(e.course, e.node)} />
+              ))}
+          </Space>
+        </Card>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 12 }}>
+        <Empty description='暂无推荐：所有到期内容已处理。可在课程卡「打开图」里挑节点学习，或生成新课程。' />
+      ))}
+
+      {/* 课程卡（次要区） */}
+      <Card size='small' title='我的课程' style={{ borderRadius: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 12 }}>
           {frame.tree?.courses.map(c => {
             const s = frame.status?.courses.find(x => x.name === c.name)
             return (
               <CourseCard
                 key={c.name} name={c.name} total={s?.total ?? 0} due={s?.due_today ?? 0}
                 counts={s?.counts ?? { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0 }}
-                tags={[]}
                 onOpen={() => { frame.setCourse(c.name); frame.goto('graph') }}
                 onReview={() => {
                   const q = reviewQueue.filter(e => e.course === c.name)
@@ -318,23 +361,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
             )
           })}
         </div>
-      )}
-
-      {/* 就绪/新学推荐（非复习流，点击直达节点） */}
-      {(rec?.events ?? []).filter(e => e.type !== 'review' && e.type !== 'overdue').length > 0 && (
-        <Card size='small' title='下一步建议' style={{ borderRadius: 10 }}>
-          <Space size={6} wrap>
-            {rec!.events.filter(e => e.type !== 'review' && e.type !== 'overdue').map((e, i) => (
-              <Button key={i} size='mini' onClick={() => { frame.setCourse(e.course); frame.goto('graph') }}>
-                <Tag size='small' color={e.type === 'new' ? 'cyan' : 'blue'} style={{ marginRight: 6 }}>
-                  {e.type === 'new' ? '新学' : e.type}
-                </Tag>
-                {e.node}
-              </Button>
-            ))}
-          </Space>
-        </Card>
-      )}
+      </Card>
 
       {session && session.length > 0 && (
         <ReviewSession queue={session} onClose={() => setSession(null)}
@@ -351,8 +378,8 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
       )}
       {createVisible && <CreateDialog visible={createVisible} onClose={() => setCreateVisible(false)} />}
 
-      {/* 后台生成悬浮指示条（allo CourseGenerationPill 同语义） */}
-      {runningJobs > 0 && (
+      {/* 后台生成悬浮指示条 */}
+      {runningJobs > 0 && !frame.lesson && (
         <div
           role='button' tabIndex={0}
           onClick={() => frame.goto('generate')}
@@ -363,7 +390,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
             borderRadius: 20, boxShadow: 'var(--color-shadow-1, 0 4px 10px rgba(0,0,0,0.1))',
             padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 8,
           }}>
-          <span className='arco-icon-loading' style={{ color: 'var(--color-primary-6,#165dff)' }}>◌</span>
+          <span style={{ color: 'var(--color-primary-6,#165dff)' }}>◌</span>
           <Text>{runningJobs} 个正文生成中</Text>
           <Text type='secondary' style={{ fontSize: 12 }}>点击查看</Text>
         </div>

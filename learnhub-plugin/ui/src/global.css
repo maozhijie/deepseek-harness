@@ -24,10 +24,12 @@ html, body, #root {
   padding: 0;
 }
 
-/* React Flow 容器必须有显式高度 */
+/* React Flow 容器必须有确定高度：父级是 Arco Space（高度 auto），
+   用视口高度兜底（减去页头与统计行约 230px），否则画布塌缩为 0、边与 fitView 全部失效。 */
 .dag-wrap {
   width: 100%;
-  height: 100%;
+  height: calc(100vh - 230px);
+  min-height: 420px;
 }
 
 /* 节点抽屉里的 Markdown 粗排（lesson 正文是 Obsidian md 片段） */

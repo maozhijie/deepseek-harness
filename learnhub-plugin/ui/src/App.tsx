@@ -11,13 +11,22 @@ import type { StatusDoc, TreeDoc } from './types'
 
 export type TabKey = 'learn' | 'graph' | 'bank' | 'stats' | 'generate' | 'proposals'
 
-/** 全局共享态：状态总览 + 课程树 + 当前课程 + 页签跳转。 */
+/** 打开中的节点学习视图（学习页二级视图）；focusNode = 图页定位高亮目标。 */
+export interface LessonRef { course: string; node: string }
+
+/** 全局共享态：状态总览 + 课程树 + 当前课程 + 页签/学习视图跳转。 */
 export interface AppFrame {
   status: StatusDoc | null
   tree: TreeDoc | null
   course: string | null
+  lesson: LessonRef | null
+  focusNode: string | null
   setCourse: (c: string) => void
   goto: (tab: TabKey) => void
+  openLesson: (course: string, node: string) => void
+  closeLesson: () => void
+  /** 跳到图页并高亮定位某节点。 */
+  locateInGraph: (node: string) => void
   reload: () => Promise<void>
   loading: boolean
 }
@@ -27,6 +36,8 @@ export default function App() {
   const [status, setStatus] = useState<StatusDoc | null>(null)
   const [tree, setTree] = useState<TreeDoc | null>(null)
   const [course, setCourse] = useState<string | null>(null)
+  const [lesson, setLesson] = useState<LessonRef | null>(null)
+  const [focusNode, setFocusNode] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [fatal, setFatal] = useState<string | null>(null)
 
@@ -64,9 +75,12 @@ export default function App() {
   }
 
   const frame: AppFrame = {
-    status, tree, course,
+    status, tree, course, lesson, focusNode,
     setCourse: c => setCourse(c),
     goto: t => setTab(t),
+    openLesson: (lcourse, lnode) => { setLesson({ course: lcourse, node: lnode }); setTab('learn') },
+    closeLesson: () => setLesson(null),
+    locateInGraph: node => { setFocusNode(node); setTab('graph') },
     reload,
     loading,
   }
