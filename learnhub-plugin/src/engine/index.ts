@@ -21,6 +21,7 @@ import { analyzeGraph } from './analysis.ts'
 import { Content } from './content.ts'
 import { GraphProposals } from './gengraph.ts'
 import { QuestionBank } from './question-bank.ts'
+import { YAML } from './yaml.ts'
 import { Sessions } from './sessions.ts'
 import { todayStr, nowIso } from './dates.ts'
 import { REFLECTION_GRADING_SYSTEM, parseReflectionGrading, evaluateAllo, PASS_SCORE, applyPracticeEvidence } from './grading.ts'
@@ -258,7 +259,7 @@ export class LearnhubEngine {
     const normalized = this.content.normalizePractice(body)
     const version = await this.content.applyGeneration(
       c.root, graph, node, normalized.body,
-      async n => (await this.loadView(c)).state[n],
+      n => state[n],
       rec => this.store.appendJournal({ ...rec, course: c.name }),
     )
     await this.content.queueDone(c.root, node)
@@ -608,6 +609,40 @@ export class LearnhubEngine {
     const c = await this.registry.resolve(courseKey)
     await this.bank.archiveQuestion(this.paths.courseRoot(c.root), node, qid, archived)
     return { course: c.name, node, qid, archived }
+  }
+
+  /** AI 出题：节点正文 → 出题提示词 + llm → 产出的题库 YAML 逐题过 validateBank 门禁追加落盘。
+   * llm 由 host 注入（返回已剥围栏的纯文本）。骨架节点（无正文）直接报错。 */
+  async questionGenerate(
+    courseKey: string | undefined, node: string, count: number,
+    llm: (prompt: string) => Promise<string>,
+  ): Promise<{ course: string; node: string; added: number; total: number }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[quiz] 节点「${node}」不在图内。`)
+    const [, regionName] = graph.blockOf[node]
+    const note = await loadNote(this.paths.courseNotePath(c.root, regionName, node))
+    const body = note.body.replace(/^>\s*内容待生成。\s*$/m, '').trim()
+    if (!body) throw new Error(`[quiz] 「${node}」还没有正文——先「生成正文」再出题。`)
+    const tpl = await this.loadPrompt('题目生成')
+    const raw = await llm(`${tpl}\n\n## 题目数量\n\n${count} 道\n\n---\n\n${body}`)
+    const doc = YAML.parse(raw) as { node?: unknown; questions?: unknown } | null
+    if (typeof doc !== 'object' || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
+      throw new Error('[quiz] 模型没有产出可用题目（questions 为空）。')
+    }
+    const parsedNode = typeof doc.node === 'string' ? doc.node.trim() : ''
+    if (parsedNode && parsedNode !== node) {
+      throw new Error(`[quiz] 题库 node 不匹配：期望「${node}」，模型给了「${parsedNode}」。`)
+    }
+    let added = 0
+    for (const raw of doc.questions.slice(0, Math.max(1, count))) {
+      const q = { ...(raw as Record<string, unknown>) }
+      delete q.id // id 由 addQuestion 按现有题数自动编号，避免与既有 q1 冲突
+      await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q)
+      added++
+    }
+    const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
+    return { course: c.name, node, added, total: bank.questions.length }
   }
 
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */

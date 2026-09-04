@@ -51,6 +51,8 @@ interface GenJob {
   node: string
   startedAt: string
   status: 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+  /** 组合管线的当前阶段：正文（content）→ 自动出题（quiz）。 */
+  phase?: 'content' | 'quiz'
   message?: string
 }
 const genJobs = new Map<string, GenJob>()
@@ -168,8 +170,11 @@ async function llmComplete(ctx: Context, prompt: string, system?: string): Promi
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') text += chunk.text
     if (chunk.type === 'finish' && (chunk.reason.kind === 'aborted' || chunk.reason.kind === 'error')) {
-      throw new Error(chunk.reason.kind === 'aborted' ? '模型调用被取消'
-        : `模型调用失败：${String(chunk.reason.failure.message)}`)
+      if (chunk.reason.kind === 'aborted') throw new Error('模型调用被取消')
+      // failure.code 是稳定错误码（NO_ADAPTER/MISSING_CREDENTIAL/AUTH/RATE_LIMIT/...），一眼定位配置问题
+      const f = chunk.reason.failure
+      const status = f.status ? `/${f.status}` : ''
+      throw new Error(`模型调用失败[${f.code}${status}]：${String(f.message)}`)
     }
     if (chunk.type === 'finish' && chunk.reason.kind === 'max-tokens') truncated = true
   }
@@ -184,14 +189,20 @@ function stripFences(body: string): string {
   return m ? m[1] : body
 }
 
-/** 课程生成管线：上下文包 + 提示词 → ctx.llm → 质检门 apply（draft 落盘）。 */
+/** AI 出题管线：节点正文 → 出题提示词 → llm → validateBank 门禁逐题落盘。 */
+async function generateQuiz(ctx: Context, course: string, node: string, count: number) {
+  return engine.questionGenerate(course, node, count, async prompt => stripFences(await llmComplete(ctx, prompt)))
+}
+
+/** 课程生成管线：上下文包 + 提示词 → ctx.llm → 质检门 apply（draft 落盘）→ 自动出题。
+ * 出题失败不回滚正文：任务标记 done 并在 message 里说明，练习页可单独重试出题。 */
 async function generateContent(ctx: Context, course: string, node: string): Promise<string> {
   const key = `${course}/${node}`
   const existing = genJobs.get(key)
   if (existing && (existing.status === 'running' || existing.status === 'cancelling')) {
     throw new Error(`「${node}」正在生成中，请稍候。`)
   }
-  const job: GenJob = { course, node, startedAt: new Date().toISOString(), status: 'running' }
+  const job: GenJob = { course, node, startedAt: new Date().toISOString(), status: 'running', phase: 'content' }
   genJobs.set(key, job)
   try {
     const pack = await engine.contentPack(course, node)
@@ -200,19 +211,29 @@ async function generateContent(ctx: Context, course: string, node: string): Prom
     // 取消语义：置旗标后 LLM 结果直接丢弃（不落盘），模型调用自然跑完
     if (job.status === 'cancelling') throw new Error('生成已取消，结果已丢弃。')
     const res = await engine.contentApply(course, node, body)
-    job.status = 'done'
-    job.message = res.message
-    return res.message
+
+    job.phase = 'quiz'
+    job.message = `${res.message}；自动出题中…`
+    try {
+      const quiz = await generateQuiz(ctx, course, node, 6)
+      job.status = 'done'
+      job.message = `${res.message}；自动出题 ${quiz.added} 道（题库共 ${quiz.total}）`
+    } catch (quizErr) {
+      job.status = 'done'
+      job.message = `${res.message}；自动出题失败（${quizErr instanceof Error ? quizErr.message : String(quizErr)}）——可在练习页单独重试`
+    }
+    return job.message
   } catch (err) {
     job.status = job.status === 'cancelling' ? 'cancelled' : 'failed'
     job.message = err instanceof Error ? err.message : String(err)
     throw err
   } finally {
-    // 终态保留 5 分钟供面板查看，之后清出注册表
+    // 终态保留：失败/取消留 24h 供排查与重试，成功留 30 分钟；之后清出注册表
+    const keep = job.status === 'failed' || job.status === 'cancelled' ? 24 * 60 * 60_000 : 30 * 60_000
     setTimeout(() => {
-      const j = genJobs.get(key)
-      if (j && j.status !== 'running' && j.status !== 'cancelling') genJobs.delete(key)
-    }, 5 * 60_000).unref()
+      const cur = genJobs.get(key)
+      if (cur && cur.status !== 'running' && cur.status !== 'cancelling') genJobs.delete(key)
+    }, keep).unref()
   }
 }
 
@@ -436,16 +457,20 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         return
       }
       if (route === '/generate') {
-        // 单次非流式：模型写完整课正文（30–90s），请求挂起直到完成
-        sendJson(res, 200, {
-          message: await generateContent(ctx, need(body, 'course'), need(body, 'node')),
-        })
+        // 单次非流式：模型写完整课正文（30–90s）+ 自动出题，请求挂起直到完成
+        sendJson(res, 200, await apiRun('api/generate', () => generateContent(ctx, need(body, 'course'), need(body, 'node'))))
+        return
+      }
+      if (route === '/question-generate') {
+        const count = Number(body.count)
+        sendJson(res, 200, await apiRun('api/question-generate', () =>
+          generateQuiz(ctx, need(body, 'course'), need(body, 'node'), Number.isInteger(count) && count > 0 ? count : 6)))
         return
       }
       if (route === '/ai-grade') {
-        sendJson(res, 200, await aiGrade(
+        sendJson(res, 200, await apiRun('api/ai-grade', () => aiGrade(
           ctx, need(body, 'course'), need(body, 'node'), needEx(body, 'ex'),
-          typeof body.answer === 'string' ? body.answer : ''))
+          typeof body.answer === 'string' ? body.answer : '')))
         return
       }
       if (route === '/review') {
@@ -457,10 +482,10 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         return
       }
       if (route === '/question-answer') {
-        sendJson(res, 200, await engine.questionAnswer(
+        sendJson(res, 200, await apiRun('api/question-answer', () => engine.questionAnswer(
           prompt => llmComplete(ctx, prompt),
           need(body, 'course'), need(body, 'node'), need(body, 'qid'),
-          typeof body.answer === 'string' ? body.answer : ''))
+          typeof body.answer === 'string' ? body.answer : '')))
         return
       }
       if (route === '/question-add') {
