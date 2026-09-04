@@ -616,7 +616,7 @@ export class LearnhubEngine {
   async questionGenerate(
     courseKey: string | undefined, node: string, count: number,
     llm: (prompt: string) => Promise<string>,
-  ): Promise<{ course: string; node: string; added: number; total: number }> {
+  ): Promise<{ course: string; node: string; added: number; skipped: number; total: number }> {
     const c = await this.registry.resolve(courseKey)
     const { graph } = await this.loadView(c)
     if (!graph.nset.has(node)) throw new Error(`[quiz] 节点「${node}」不在图内。`)
@@ -630,19 +630,22 @@ export class LearnhubEngine {
     if (typeof doc !== 'object' || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
       throw new Error('[quiz] 模型没有产出可用题目（questions 为空）。')
     }
-    const parsedNode = typeof doc.node === 'string' ? doc.node.trim() : ''
-    if (parsedNode && parsedNode !== node) {
-      throw new Error(`[quiz] 题库 node 不匹配：期望「${node}」，模型给了「${parsedNode}」。`)
-    }
+    // doc.node 只是模型对节点的复述（常自创短名），落盘位置由入参决定，不作硬校验
     let added = 0
+    let skipped = 0
     for (const raw of doc.questions.slice(0, Math.max(1, count))) {
       const q = { ...(raw as Record<string, unknown>) }
       delete q.id // id 由 addQuestion 按现有题数自动编号，避免与既有 q1 冲突
-      await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q)
-      added++
+      try {
+        await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q)
+        added++
+      } catch {
+        skipped++ // 单题非法（如模型超纲出题型）不毁整批，好题照常入库
+      }
     }
+    if (!added) throw new Error('[quiz] 模型产出的题目全部未过校验门（题型/答案格式不符），一道都没入库。')
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
-    return { course: c.name, node, added, total: bank.questions.length }
+    return { course: c.name, node, added, skipped, total: bank.questions.length }
   }
 
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */

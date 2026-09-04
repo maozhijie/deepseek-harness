@@ -458,7 +458,9 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       }
       if (route === '/generate') {
         // 单次非流式：模型写完整课正文（30–90s）+ 自动出题，请求挂起直到完成
-        sendJson(res, 200, await apiRun('api/generate', () => generateContent(ctx, need(body, 'course'), need(body, 'node'))))
+        sendJson(res, 200, await apiRun('api/generate', async () => ({
+          message: await generateContent(ctx, need(body, 'course'), need(body, 'node')),
+        })))
         return
       }
       if (route === '/question-generate') {

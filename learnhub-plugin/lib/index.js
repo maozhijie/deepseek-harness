@@ -10752,11 +10752,11 @@ var Content = class _Content {
 
 ## \u786C\u7EA6\u675F
 
-1. \u9898\u578B\u5FC5\u987B\u591A\u6837\uFF1A\u5355\u9009\uFF08single_choice\uFF09\u3001\u591A\u9009\uFF08multi_choice\uFF09\u3001\u5224\u65AD\uFF08true_false\uFF09\u3001\u586B\u7A7A\uFF08fill_in_blank\uFF09\u81F3\u5C11\u51FA\u73B0\u4E09\u79CD\uFF0C\u4E0D\u8981\u5168\u51FA\u540C\u4E00\u9898\u578B\u3002
+1. \u9898\u578B\u5FC5\u987B\u591A\u6837\u4E14\u53EA\u7528\u8FD9\u4E09\u79CD\uFF1A\u5355\u9009\uFF08single_choice\uFF09\u3001\u5224\u65AD\uFF08true_false\uFF09\u3001\u586B\u7A7A\uFF08fill_in_blank\uFF09\uFF0C\u6BCF\u79CD\u81F3\u5C11\u4E00\u9053\uFF0C\u4E0D\u8981\u5168\u51FA\u540C\u4E00\u9898\u578B\u3002
 2. \u96BE\u5EA6\u9012\u8FDB\uFF1A\u5F00\u5934 1-2 \u9053\u6982\u5FF5\u8FA8\u6790\uFF08difficulty: 1\uFF09\uFF0C\u4E2D\u95F4\u5E94\u7528\u4E0E\u8BA1\u7B97\uFF08difficulty: 2\uFF09\uFF0C\u6536\u5C3E 1-2 \u9053\u7EFC\u5408\u6216\u6613\u9519\u9677\u9631\uFF08difficulty: 3\uFF09\u3002
 3. \u6BCF\u9898\u5FC5\u987B\u7ED9\u5168\uFF1A\u9898\u5E72\u3001\u7B54\u6848\u3001\u89E3\u6790\uFF08\u8BF4\u660E\u4E3A\u4EC0\u4E48\u5BF9\u3001\u9519\u8BEF\u9009\u9879\u9519\u5728\u54EA\uFF09\u3002
 4. \u53EA\u8003\u6B63\u6587\u91CC\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u4E0D\u5F97\u5F15\u5165\u6B63\u6587\u6CA1\u6709\u7684\u6982\u5FF5\u3001\u8BB0\u53F7\u6216\u7ED3\u8BBA\u3002
-5. \u9009\u62E9\u9898 options \u4E0D\u5E26 A./B. \u7F16\u53F7\u524D\u7F00\uFF08\u7CFB\u7EDF\u81EA\u52A8\u7F16\u53F7\uFF09\uFF1B\u586B\u7A7A\u9898 answer \u7528\u6570\u7EC4\u5217\u51FA\u6240\u6709\u53EF\u63A5\u53D7\u5199\u6CD5\u3002
+5. \u9009\u62E9\u9898 options \u4E0D\u5E26 A./B. \u7F16\u53F7\u524D\u7F00\uFF08\u7CFB\u7EDF\u81EA\u52A8\u7F16\u53F7\uFF09\uFF1B\u586B\u7A7A\u9898 answer \u7528\u6570\u7EC4\u5217\u51FA\u6240\u6709\u53EF\u63A5\u53D7\u5199\u6CD5\uFF1Bnode \u5B57\u6BB5\u539F\u6837\u7167\u6284\u7CFB\u7EDF\u7ED9\u51FA\u7684\u8282\u70B9\u540D\u3002
 
 ## \u8F93\u51FA
 
@@ -12930,19 +12930,21 @@ ${body}`);
     if (typeof doc !== "object" || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
       throw new Error("[quiz] \u6A21\u578B\u6CA1\u6709\u4EA7\u51FA\u53EF\u7528\u9898\u76EE\uFF08questions \u4E3A\u7A7A\uFF09\u3002");
     }
-    const parsedNode = typeof doc.node === "string" ? doc.node.trim() : "";
-    if (parsedNode && parsedNode !== node) {
-      throw new Error(`[quiz] \u9898\u5E93 node \u4E0D\u5339\u914D\uFF1A\u671F\u671B\u300C${node}\u300D\uFF0C\u6A21\u578B\u7ED9\u4E86\u300C${parsedNode}\u300D\u3002`);
-    }
     let added = 0;
+    let skipped = 0;
     for (const raw2 of doc.questions.slice(0, Math.max(1, count))) {
       const q = { ...raw2 };
       delete q.id;
-      await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q);
-      added++;
+      try {
+        await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q);
+        added++;
+      } catch {
+        skipped++;
+      }
     }
+    if (!added) throw new Error("[quiz] \u6A21\u578B\u4EA7\u51FA\u7684\u9898\u76EE\u5168\u90E8\u672A\u8FC7\u6821\u9A8C\u95E8\uFF08\u9898\u578B/\u7B54\u6848\u683C\u5F0F\u4E0D\u7B26\uFF09\uFF0C\u4E00\u9053\u90FD\u6CA1\u5165\u5E93\u3002");
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
-    return { course: c.name, node, added, total: bank.questions.length };
+    return { course: c.name, node, added, skipped, total: bank.questions.length };
   }
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
   async courseDelete(courseKey) {
@@ -13369,7 +13371,9 @@ async function handleApi(ctx, req, res) {
         return;
       }
       if (route === "/generate") {
-        sendJson(res, 200, await apiRun("api/generate", () => generateContent(ctx, need(body, "course"), need(body, "node"))));
+        sendJson(res, 200, await apiRun("api/generate", async () => ({
+          message: await generateContent(ctx, need(body, "course"), need(body, "node"))
+        })));
         return;
       }
       if (route === "/question-generate") {

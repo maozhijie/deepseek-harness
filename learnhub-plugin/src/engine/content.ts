@@ -210,11 +210,11 @@ export class Content {
 
 ## 硬约束
 
-1. 题型必须多样：单选（single_choice）、多选（multi_choice）、判断（true_false）、填空（fill_in_blank）至少出现三种，不要全出同一题型。
+1. 题型必须多样且只用这三种：单选（single_choice）、判断（true_false）、填空（fill_in_blank），每种至少一道，不要全出同一题型。
 2. 难度递进：开头 1-2 道概念辨析（difficulty: 1），中间应用与计算（difficulty: 2），收尾 1-2 道综合或易错陷阱（difficulty: 3）。
 3. 每题必须给全：题干、答案、解析（说明为什么对、错误选项错在哪）。
 4. 只考正文里讲过的内容，不得引入正文没有的概念、记号或结论。
-5. 选择题 options 不带 A./B. 编号前缀（系统自动编号）；填空题 answer 用数组列出所有可接受写法。
+5. 选择题 options 不带 A./B. 编号前缀（系统自动编号）；填空题 answer 用数组列出所有可接受写法；node 字段原样照抄系统给出的节点名。
 
 ## 输出
 
