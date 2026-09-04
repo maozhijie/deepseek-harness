@@ -17,9 +17,8 @@
  * 作答副作用 = practice 流水 + frontmatter 计数/EMA（调度仍走 D15 settle）。
  */
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { YAML } from './yaml.ts'
-import { writeFile } from 'node:fs/promises'
 import { normChoice } from './grading.ts'
 import type { AlloKind } from './grading.ts'
 import type { Paths } from './paths.ts'
@@ -34,6 +33,8 @@ export interface BankQuestion {
   explanation?: string
   difficulty?: number
   uses?: string[]
+  tags?: string[]
+  archived?: boolean
 }
 
 export interface BankDoc { node: string; questions: BankQuestion[] }
@@ -100,6 +101,8 @@ export function validateBank(doc: unknown, expectedNode?: string): { errors?: st
         ...(typeof e.explanation === 'string' && e.explanation ? { explanation: e.explanation } : {}),
         ...(e.difficulty !== undefined && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {}),
         ...(Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {}),
+        ...(Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {}),
+        ...(e.archived === true ? { archived: true } : {}),
       })
     })
   }
@@ -141,5 +144,69 @@ export class QuestionBank {
     await mkdir(p.replace(/[/\\][^/\\]+$/, ''), { recursive: true })
     await writeFile(p, YAML.stringify(doc), 'utf8')
     return { node: spec.node, count: spec.questions.length, path: p }
+  }
+
+  // ---- 单题操作（题目管理面板用；每次写回前全量过 validateBank 门禁）----
+
+  /** 读题库原始 YAML 文档（缺失/损坏返回 null）。 */
+  private async loadDoc(courseRoot: string, node: string): Promise<Record<string, unknown> | null> {
+    const p = this.bankPath(courseRoot, node)
+    if (!existsSync(p)) return null
+    try {
+      const doc = YAML.parse(await readFile(p, 'utf8'))
+      return typeof doc === 'object' && doc !== null ? doc as Record<string, unknown> : null
+    } catch {
+      return null
+    }
+  }
+
+  private async writeDoc(courseRoot: string, node: string, doc: unknown): Promise<void> {
+    const p = this.bankPath(courseRoot, node)
+    await mkdir(p.replace(/[/\\][^/\\]+$/, ''), { recursive: true })
+    await writeFile(p, YAML.stringify(doc), 'utf8')
+  }
+
+  /** 追加单题 → 新题 id 与题库总题数。 */
+  async addQuestion(courseRoot: string, node: string, question: Record<string, unknown>): Promise<{ id: string; count: number }> {
+    const doc = await this.loadDoc(courseRoot, node) ?? { node, questions: [] as Array<Record<string, unknown>> }
+    const list = Array.isArray(doc.questions) ? doc.questions as Array<Record<string, unknown>> : []
+    const id = typeof question.id === 'string' && question.id.trim() ? question.id.trim() : `q${list.length + 1}`
+    if (list.some(q => (q as { id?: unknown }).id === id)) {
+      throw new Error(`[question-add] 题目 id「${id}」已存在。`)
+    }
+    const next = [...list, { ...question, id }]
+    const v = validateBank({ ...doc, questions: next }, node)
+    if (v.errors) throw new Error(`[question-add] 校验失败，未写入。\n${v.errors.map(e => `  ✗ ${e}`).join('\n')}`)
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next })
+    return { id, count: next.length }
+  }
+
+  /** 更新单题字段（patch 合并；id 不可改）。 */
+  async updateQuestion(courseRoot: string, node: string, qid: string, patch: Record<string, unknown>): Promise<void> {
+    const doc = await this.loadDoc(courseRoot, node)
+    if (!doc) throw new Error(`[question-update] ${node} 没有题库文件。`)
+    const list = Array.isArray(doc.questions) ? doc.questions as Array<Record<string, unknown>> : []
+    const idx = list.findIndex(q => (q as { id?: unknown }).id === qid)
+    if (idx < 0) throw new Error(`[question-update] ${node} 的题库没有 ${qid}。`)
+    const merged = { ...list[idx], ...patch, id: qid }
+    const next = [...list]
+    next[idx] = merged
+    const v = validateBank({ ...doc, questions: next }, node)
+    if (v.errors) throw new Error(`[question-update] 校验失败，未写入。\n${v.errors.map(e => `  ✗ ${e}`).join('\n')}`)
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next })
+  }
+
+  /** 归档/取消归档单题（归档题在 questionsAll 里仍可见并带标记，作答侧过滤）。 */
+  async archiveQuestion(courseRoot: string, node: string, qid: string, archived: boolean): Promise<void> {
+    const doc = await this.loadDoc(courseRoot, node)
+    if (!doc) throw new Error(`[question-archive] ${node} 没有题库文件。`)
+    const list = Array.isArray(doc.questions) ? doc.questions as Array<Record<string, unknown>> : []
+    const hit = list.find(q => (q as { id?: unknown }).id === qid)
+    if (!hit) throw new Error(`[question-archive] ${node} 的题库没有 ${qid}。`)
+    if (archived) (hit as { archived?: boolean }).archived = true
+    else delete (hit as { archived?: boolean }).archived
+    const v = validateBank({ ...doc, questions: list }, node)
+    if (v.errors) throw new Error(`[question-archive] 校验失败，未写入。\n${v.errors.map(e => `  ✗ ${e}`).join('\n')}`)
+    await this.writeDoc(courseRoot, node, { ...doc, questions: list })
   }
 }

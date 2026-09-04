@@ -6,13 +6,39 @@
  * esbuild JS API，与 dsh-worktable 构建同构。
  */
 import { build } from 'esbuild'
-import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 mkdirSync(join(here, 'lib'), { recursive: true })
+
+/** 面板 SPA 构建（ui/ → web/dist）：host 直接伺服产物，必须先于 lib 构建。
+ * node_modules 缺失（干净克隆）时自动补 npm install。
+ * Windows 工作副本是 CRLF，vite 会原样带进文本产物 → 统一 LF（whitespace 门禁）。 */
+function buildUi() {
+  const uiDir = join(here, 'ui')
+  if (!existsSync(join(uiDir, 'node_modules'))) {
+    console.log('[dsh-learnhub build] ui/node_modules missing, npm install (first time only)')
+    execSync('npm install --no-fund --no-audit', { cwd: uiDir, stdio: 'inherit' })
+  }
+  execSync('npm run build', { cwd: uiDir, stdio: 'inherit' })
+  const distDir = join(here, 'web', 'dist')
+  const walk = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name)
+      if (entry.isDirectory()) walk(p)
+      else if (/\.(html|js|mjs|css|map|json|svg)$/.test(entry.name)) {
+        const text = readFileSync(p, 'utf8')
+        if (text.includes('\r')) writeFileSync(p, text.replace(/\r\n/g, '\n'), 'utf8')
+      }
+    }
+  }
+  walk(distDir)
+}
+buildUi()
 
 /** 产物里依赖源码（ts-fsrs JSDoc 等）遗留的纯空白行会挂 whitespace 门禁；
  *  行尾空白仅在「整行为空白」时无语义，规范为空行（模板字符串内的空行同理）。 */

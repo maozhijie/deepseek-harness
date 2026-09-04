@@ -103,6 +103,9 @@ var init_paths = __esm({
       get promptDir() {
         return `${this.centerStateDir}/\u63D0\u793A\u8BCD`;
       }
+      get trashDir() {
+        return `${this.centerRoot}/.trash`;
+      }
       sessionPath(dateStr) {
         return `${this.sessionDir}/${dateStr}.md`;
       }
@@ -115,6 +118,10 @@ var init_paths = __esm({
       // ---- 课程级 ----
       courseRoot(root) {
         return `${this.centerRoot}/${root}`;
+      }
+      /** 题库目录（question-bank 的 <课程根>/题库/<节点>.yaml）。 */
+      bankDir(root) {
+        return `${this.courseRoot(root)}/\u9898\u5E93`;
       }
       dataDir(root) {
         return `${this.courseRoot(root)}/data`;
@@ -7575,6 +7582,25 @@ var init_store = __esm({
         const lines = await this.readJsonl(this.paths.journalPath);
         return course ? lines.filter((r) => r.course === course).length : lines.length;
       }
+      /** 学习行为按日聚合（journal + practice；ts 为本地时间 ISO，slice(0,10) 即本地日）。
+       * 打卡/日历热力图的数据源——行为流水即事实，零新增文件。 */
+      async activityCounts() {
+        const [journal, practice] = await Promise.all([
+          this.readJsonl(this.paths.journalPath),
+          this.readJsonl(this.paths.practicePath)
+        ]);
+        const byDay = {};
+        const bump = (ts, key) => {
+          if (!ts) return;
+          const day = ts.slice(0, 10);
+          const slot = byDay[day] ?? (byDay[day] = { journal: 0, practice: 0, total: 0 });
+          slot[key] += 1;
+          slot.total += 1;
+        };
+        for (const r of journal) bump(r.ts, "journal");
+        for (const r of practice) bump(r.ts, "practice");
+        return byDay;
+      }
       // ---- practice ----
       /** 追加一条作答记录。 */
       async appendPractice(rec) {
@@ -7667,9 +7693,9 @@ var init_store = __esm({
       async latestSnapshotVersion(course) {
         const dir = this.paths.snapshotDir;
         if (!existsSync(dir)) return 0;
-        const { readdir: readdir3 } = await import("node:fs/promises");
+        const { readdir: readdir4 } = await import("node:fs/promises");
         let max = 0;
-        for (const f of await readdir3(dir)) {
+        for (const f of await readdir4(dir)) {
           const m = f.match(new RegExp(`^${course}-v(\\d+)\\.json$`));
           if (m) max = Math.max(max, Number(m[1]));
         }
@@ -7838,7 +7864,7 @@ var init_notes = __esm({
 // src/engine/index.ts
 init_paths();
 import { existsSync as existsSync6 } from "node:fs";
-import { readFile as readFile9 } from "node:fs/promises";
+import { mkdir as mkdir9, readdir as readdir3, readFile as readFile10, rename as rename3 } from "node:fs/promises";
 
 // src/engine/registry.ts
 init_yaml();
@@ -7874,6 +7900,17 @@ var Registry = class {
   /** 全部启用中的课程（保序）。 */
   async enabled() {
     return (await this.load()).filter((c) => c.enabled !== false);
+  }
+  /** 设置课程标签（整体替换；空数组移除字段，保持注册表干净）。 */
+  async setTags(courseKey, tags) {
+    const courses = await this.load();
+    const hit = courses.find((c) => courseKey === c.name || courseKey === c.id);
+    if (!hit) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseKey}\u300D\u3002`);
+    const clean = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
+    if (clean.length) hit.tags = clean;
+    else delete hit.tags;
+    await this.save(courses);
+    return clean;
   }
   /** CLI 课程选择语义：显式指定 → 精确匹配；未指定 → 唯一启用课程。 */
   async resolve(key) {
@@ -11027,6 +11064,7 @@ init_yaml();
 init_store();
 import { readFile as readFile7, writeFile as writeFile6, rename as rename2, mkdir as mkdir6, unlink } from "node:fs/promises";
 import { existsSync as existsSync3 } from "node:fs";
+init_notes();
 var EDIT_OPS = ["add_node", "del_node", "set_pre", "rename", "move", "set_note"];
 function nonempty(v, what) {
   if (typeof v !== "string" || !v.trim()) throw new Error(`${what} \u4E0D\u80FD\u4E3A\u7A7A`);
@@ -11133,6 +11171,22 @@ var GraphProposals = class {
     this.registry = registry;
     this.centerRoot = centerRoot;
   }
+  /** 为图中缺笔记的节点补骨架文件（幂等）：gen/edit apply 落图后调用。
+   * 节点存在于图就该有 frontmatter 文件——vault 笔记是调度状态的事实源。 */
+  async ensureNotesFor(root, regions) {
+    let created = 0;
+    for (const r of regions) {
+      for (const b of r.blocks) {
+        for (const n of b.nodes) {
+          const path = this.paths.courseNotePath(root, r.name, n.name);
+          if (existsSync3(path)) continue;
+          await saveNote(path, defaultFrontmatter(n.name), "> \u5185\u5BB9\u5F85\u751F\u6210\u3002\n");
+          created++;
+        }
+      }
+    }
+    return created;
+  }
   /** 提案产物 YAML 落盘（全留痕）→ artifact 路径。 */
   async saveArtifact(kind, course, doc) {
     const pid = await this.store.createProposal(kind, course, "", "");
@@ -11202,6 +11256,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
     const regions = await store.load();
     const version2 = await this.store.latestSnapshotVersion(course.name) + 1;
     await this.store.saveSnapshot(course.name, version2, snapshotDoc(store, regions));
+    await this.ensureNotesFor(root, regions);
     await this.store.appendJournal({ course: course.name, node: "*", rating: null, kind: "graph_gen", elapsed_days: 0, session: String(prop.id), detail: `\u65B0\u589E\u533A: ${written.join("\u3001")}` });
     await this.store.updateProposal(prop.id, { status: "applied", decided: (/* @__PURE__ */ new Date()).toISOString(), decision_note: `\u5FEB\u7167 v${version2}` });
     return { course: course.name, regions: written, snapshot: version2, nodes: new Graph(regions).names.length };
@@ -11270,6 +11325,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
     const regions2 = await store.load();
     const version2 = await this.store.latestSnapshotVersion(course.name) + 1;
     await this.store.saveSnapshot(course.name, version2, snapshotDoc(store, regions2));
+    await this.ensureNotesFor(root, regions2);
     await this.store.appendJournal({
       course: course.name,
       node: "*",
@@ -11498,8 +11554,7 @@ function applyOpsToRegions(regions, ops) {
 // src/engine/question-bank.ts
 init_yaml();
 import { existsSync as existsSync4 } from "node:fs";
-import { mkdir as mkdir7 } from "node:fs/promises";
-import { writeFile as writeFile7 } from "node:fs/promises";
+import { mkdir as mkdir7, readFile as readFile8, writeFile as writeFile7 } from "node:fs/promises";
 init_paths();
 var KINDS = ["single_choice", "true_false", "fill_in_blank", "reflection"];
 function validateBank(doc, expectedNode) {
@@ -11560,7 +11615,9 @@ function validateBank(doc, expectedNode) {
         ...Array.isArray(e.options) && e.options.length ? { options: e.options.map(String) } : {},
         ...typeof e.explanation === "string" && e.explanation ? { explanation: e.explanation } : {},
         ...e.difficulty !== void 0 && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {},
-        ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {}
+        ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {},
+        ...Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {},
+        ...e.archived === true ? { archived: true } : {}
       });
     });
   }
@@ -11602,11 +11659,72 @@ ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     await writeFile7(p, YAML.stringify(doc), "utf8");
     return { node: spec.node, count: spec.questions.length, path: p };
   }
+  // ---- 单题操作（题目管理面板用；每次写回前全量过 validateBank 门禁）----
+  /** 读题库原始 YAML 文档（缺失/损坏返回 null）。 */
+  async loadDoc(courseRoot, node) {
+    const p = this.bankPath(courseRoot, node);
+    if (!existsSync4(p)) return null;
+    try {
+      const doc = YAML.parse(await readFile8(p, "utf8"));
+      return typeof doc === "object" && doc !== null ? doc : null;
+    } catch {
+      return null;
+    }
+  }
+  async writeDoc(courseRoot, node, doc) {
+    const p = this.bankPath(courseRoot, node);
+    await mkdir7(p.replace(/[/\\][^/\\]+$/, ""), { recursive: true });
+    await writeFile7(p, YAML.stringify(doc), "utf8");
+  }
+  /** 追加单题 → 新题 id 与题库总题数。 */
+  async addQuestion(courseRoot, node, question) {
+    const doc = await this.loadDoc(courseRoot, node) ?? { node, questions: [] };
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const id = typeof question.id === "string" && question.id.trim() ? question.id.trim() : `q${list.length + 1}`;
+    if (list.some((q) => q.id === id)) {
+      throw new Error(`[question-add] \u9898\u76EE id\u300C${id}\u300D\u5DF2\u5B58\u5728\u3002`);
+    }
+    const next = [...list, { ...question, id }];
+    const v = validateBank({ ...doc, questions: next }, node);
+    if (v.errors) throw new Error(`[question-add] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next });
+    return { id, count: next.length };
+  }
+  /** 更新单题字段（patch 合并；id 不可改）。 */
+  async updateQuestion(courseRoot, node, qid, patch) {
+    const doc = await this.loadDoc(courseRoot, node);
+    if (!doc) throw new Error(`[question-update] ${node} \u6CA1\u6709\u9898\u5E93\u6587\u4EF6\u3002`);
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const idx = list.findIndex((q) => q.id === qid);
+    if (idx < 0) throw new Error(`[question-update] ${node} \u7684\u9898\u5E93\u6CA1\u6709 ${qid}\u3002`);
+    const merged = { ...list[idx], ...patch, id: qid };
+    const next = [...list];
+    next[idx] = merged;
+    const v = validateBank({ ...doc, questions: next }, node);
+    if (v.errors) throw new Error(`[question-update] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next });
+  }
+  /** 归档/取消归档单题（归档题在 questionsAll 里仍可见并带标记，作答侧过滤）。 */
+  async archiveQuestion(courseRoot, node, qid, archived) {
+    const doc = await this.loadDoc(courseRoot, node);
+    if (!doc) throw new Error(`[question-archive] ${node} \u6CA1\u6709\u9898\u5E93\u6587\u4EF6\u3002`);
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const hit = list.find((q) => q.id === qid);
+    if (!hit) throw new Error(`[question-archive] ${node} \u7684\u9898\u5E93\u6CA1\u6709 ${qid}\u3002`);
+    if (archived) hit.archived = true;
+    else delete hit.archived;
+    const v = validateBank({ ...doc, questions: list }, node);
+    if (v.errors) throw new Error(`[question-archive] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: list });
+  }
 };
 
 // src/engine/sessions.ts
 init_dates();
-import { readFile as readFile8, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
+import { readFile as readFile9, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
 import { existsSync as existsSync5 } from "node:fs";
 init_notes();
 function doneSet(graph, state) {
@@ -11937,7 +12055,7 @@ var Sessions = class _Sessions {
   async today(enabled, minutes, today = todayStr()) {
     const path = this.paths.sessionPath(today);
     if (existsSync5(path)) {
-      const raw = await readFile8(path, "utf8");
+      const raw = await readFile9(path, "utf8");
       const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       if (m && /settled:\s*false/.test(m[1])) {
         return { message: `[today] \u4ECA\u65E5\u5DE5\u4F5C\u5355\u5DF2\u5B58\u5728\u4E14\u672A\u7ED3\u7B97\uFF0C\u76F4\u63A5\u7EE7\u7EED\u4F5C\u7B54: ${path}` };
@@ -11992,7 +12110,7 @@ var Sessions = class _Sessions {
     const ds = dateStr || today;
     const path = this.paths.sessionPath(ds);
     if (!existsSync5(path)) return { message: `[settle] \u672A\u627E\u5230\u4F1A\u8BDD\u5DE5\u4F5C\u5355: ${path}`, code: 1 };
-    const raw = await readFile8(path, "utf8");
+    const raw = await readFile9(path, "utf8");
     if (/^---[\s\S]*?settled:\s*true[\s\S]*?---/.test(raw)) {
       return { message: "[settle] \u8BE5\u4F1A\u8BDD\u5DF2\u7ED3\u7B97\u8FC7\uFF08\u5E42\u7B49\u4FDD\u62A4\uFF09\uFF0C\u8DF3\u8FC7\u3002", code: 0 };
     }
@@ -12515,7 +12633,7 @@ ${answer}`,
     const p = input.replace(/\\/g, "/");
     const rel = p.startsWith(`${vaultRoot}/`) ? p.slice(vaultRoot.length + 1) : p.replace(/^\/+/, "");
     const abs = `${vaultRoot}/${rel}`;
-    const raw = await readFile9(abs, "utf8");
+    const raw = await readFile10(abs, "utf8");
     const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const node = m ? (m[1].match(/^node:\s*(.+)$/m)?.[1] ?? "").trim() : "";
     if (!node) throw new Error(`${rel} \u7684 frontmatter \u7F3A\u5C11 node \u5B57\u6BB5\uFF0C\u4E0D\u662F\u8BFE\u7A0B\u6587\u4EF6\u3002`);
@@ -12528,7 +12646,7 @@ ${answer}`,
   }
   /** 提取笔记「内容反馈」区正文；仅占位符或为空返回 null。 */
   async feedbackBody(absPath) {
-    const raw = await readFile9(absPath, "utf8");
+    const raw = await readFile10(absPath, "utf8");
     const sec = raw.match(/## 内容反馈\n([\s\S]*?)(?=\n## |<!-- enc_candidates|$)/);
     const body = (sec?.[1] ?? "").replace(/在此写下你对本课内容的问题与建议.*$/m, "").trim();
     return body || null;
@@ -12575,7 +12693,7 @@ ${answer}`,
     return {
       course: c.name,
       node,
-      questions: bank.questions.map((q, i) => ({
+      questions: bank.questions.filter((q) => q.archived !== true).map((q, i) => ({
         id: q.id,
         kind: q.kind,
         q: q.q,
@@ -12656,6 +12774,124 @@ ${String(q.answer)}`,
       answer: q.kind === "true_false" ? q.answer : q.kind === "single_choice" ? q.answer : q.kind === "fill_in_blank" ? Array.isArray(q.answer) ? q.answer.join(" / ") : q.answer : String(q.answer),
       kind: q.kind
     };
+  }
+  // ---- 学习面板扩展（打卡/日历/标签/题目管理/课程删除）----
+  /** 今日打卡状态（本地日；journal/practice 有行为即打卡，行为流水即事实）。 */
+  async checkinToday() {
+    const byDay = await this.store.activityCounts();
+    const today = byDay[todayStr()] ?? { journal: 0, practice: 0, total: 0 };
+    return { checked: today.total > 0, journal: today.journal, practice: today.practice, total: today.total };
+  }
+  /** 日历热力图数据（指定年；month 缺省=全年）。 */
+  async calendarStats(year, month) {
+    const byDay = await this.store.activityCounts();
+    const days = Object.entries(byDay).filter(([date]) => {
+      const m = date.match(/^(\d{4})-(\d{2})/);
+      if (!m || +m[1] !== year) return false;
+      return month === void 0 || +m[2] === month;
+    }).map(([date, c]) => ({ date, journal: c.journal, practice: c.practice, total: c.total })).sort((a, b) => a.date.localeCompare(b.date));
+    return { year, month: month ?? null, days };
+  }
+  /** 全中心标签聚合（课程 tags + 启用课程全部题库的题目 tags，去重排序）。 */
+  async listTags() {
+    const tags = /* @__PURE__ */ new Set();
+    const courses = await this.registry.enabled();
+    for (const c of courses) (c.tags ?? []).forEach((t) => tags.add(t));
+    for (const c of courses) {
+      let files = [];
+      try {
+        files = await readdir3(this.paths.bankDir(c.root));
+      } catch {
+        continue;
+      }
+      for (const f of files.filter((f2) => f2.endsWith(".yaml"))) {
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), f.replace(/\.yaml$/, ""));
+        bank.questions.forEach((q) => (q.tags ?? []).forEach((t) => tags.add(t)));
+      }
+    }
+    return [...tags].sort();
+  }
+  async setCourseTags(courseKey, tags) {
+    const c = await this.registry.resolve(courseKey);
+    return { course: c.name, tags: await this.registry.setTags(c.name, tags) };
+  }
+  async setQuestionTags(courseKey, node, qid, tags) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { tags });
+    return { course: c.name, node, qid, tags };
+  }
+  /** 全部题库条目（题目管理列表；不含答案）。 */
+  async questionsAll(courseKey) {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled();
+    const out = [];
+    for (const c of courses) {
+      let files = [];
+      try {
+        files = await readdir3(this.paths.bankDir(c.root));
+      } catch {
+        continue;
+      }
+      for (const f of files.filter((f2) => f2.endsWith(".yaml")).sort()) {
+        const node = f.replace(/\.yaml$/, "");
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+        bank.questions.forEach((q, i) => {
+          out.push({
+            course: c.name,
+            node,
+            qid: q.id,
+            no: i + 1,
+            kind: q.kind,
+            q: q.q,
+            difficulty: q.difficulty ?? 1,
+            tags: q.tags ?? [],
+            archived: q.archived === true,
+            hasExplanation: Boolean(q.explanation),
+            ...q.options?.length ? { options: q.options } : {}
+          });
+        });
+      }
+    }
+    return { total: out.length, questions: out };
+  }
+  async questionAdd(courseKey, node, question) {
+    const c = await this.registry.resolve(courseKey);
+    const r = await this.bank.addQuestion(this.paths.courseRoot(c.root), node, question);
+    return { course: c.name, node, ...r };
+  }
+  async questionUpdate(courseKey, node, qid, patch) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, patch);
+    return { course: c.name, node, qid };
+  }
+  async questionArchive(courseKey, node, qid, archived) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.archiveQuestion(this.paths.courseRoot(c.root), node, qid, archived);
+    return { course: c.name, node, qid, archived };
+  }
+  /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
+  async courseDelete(courseKey) {
+    const c = await this.registry.get(courseKey);
+    if (!c) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseKey}\u300D\u3002`);
+    const rest = (await this.registry.load()).filter((x) => x.name !== c.name && x.id !== c.id);
+    await this.registry.save(rest);
+    const src = this.paths.courseRoot(c.root);
+    const trash = `${this.paths.trashDir}/${c.root}-${Date.now()}`;
+    if (existsSync6(src)) {
+      await mkdir9(this.paths.trashDir, { recursive: true });
+      await rename3(src, trash);
+    }
+    return { removed: c.name, trash };
+  }
+  /** 为课程缺笔记的节点补骨架文件（幂等；存量课程修复/维护用）。 */
+  async ensureAllNotes(courseKey) {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled();
+    const out = [];
+    for (const c of courses) {
+      const { graph } = await this.loadView(c);
+      const created = await this.proposals.ensureNotesFor(c.root, graph.regions);
+      out.push({ course: c.name, created });
+    }
+    return { courses: out };
   }
   // ---- utils ----
   async updateNoteFm(path, fm) {

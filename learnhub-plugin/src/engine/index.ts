@@ -9,7 +9,7 @@
  * 人审产物（proposals.json / snapshots/）。无 SQLite，无投影回写。
  */
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename } from 'node:fs/promises'
 import { Paths } from './paths.ts'
 import { Registry } from './registry.ts'
 import { Store } from './store.ts'
@@ -433,7 +433,7 @@ export class LearnhubEngine {
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
     return {
       course: c.name, node,
-      questions: bank.questions.map((q, i) => ({
+      questions: bank.questions.filter(q => q.archived !== true).map((q, i) => ({
         id: q.id, kind: q.kind, q: q.q, no: i + 1,
         difficulty: q.difficulty ?? 1,
         ...(q.options?.length ? { options: q.options } : {}),
@@ -506,6 +506,135 @@ export class LearnhubEngine {
         : String(q.answer),
       kind: q.kind,
     }
+  }
+
+  // ---- 学习面板扩展（打卡/日历/标签/题目管理/课程删除）----
+
+  /** 今日打卡状态（本地日；journal/practice 有行为即打卡，行为流水即事实）。 */
+  async checkinToday(): Promise<{ checked: boolean; journal: number; practice: number; total: number }> {
+    const byDay = await this.store.activityCounts()
+    const today = byDay[todayStr()] ?? { journal: 0, practice: 0, total: 0 }
+    return { checked: today.total > 0, journal: today.journal, practice: today.practice, total: today.total }
+  }
+
+  /** 日历热力图数据（指定年；month 缺省=全年）。 */
+  async calendarStats(year: number, month?: number): Promise<{
+    year: number; month: number | null
+    days: Array<{ date: string; journal: number; practice: number; total: number }>
+  }> {
+    const byDay = await this.store.activityCounts()
+    const days = Object.entries(byDay)
+      .filter(([date]) => {
+        const m = date.match(/^(\d{4})-(\d{2})/)
+        if (!m || +m[1] !== year) return false
+        return month === undefined || +m[2] === month
+      })
+      .map(([date, c]) => ({ date, journal: c.journal, practice: c.practice, total: c.total }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+    return { year, month: month ?? null, days }
+  }
+
+  /** 全中心标签聚合（课程 tags + 启用课程全部题库的题目 tags，去重排序）。 */
+  async listTags(): Promise<string[]> {
+    const tags = new Set<string>()
+    const courses = await this.registry.enabled()
+    for (const c of courses) (c.tags ?? []).forEach(t => tags.add(t))
+    for (const c of courses) {
+      let files: string[] = []
+      try {
+        files = await readdir(this.paths.bankDir(c.root))
+      } catch {
+        continue
+      }
+      for (const f of files.filter(f => f.endsWith('.yaml'))) {
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), f.replace(/\.yaml$/, ''))
+        bank.questions.forEach(q => (q.tags ?? []).forEach(t => tags.add(t)))
+      }
+    }
+    return [...tags].sort()
+  }
+
+  async setCourseTags(courseKey: string, tags: string[]): Promise<{ course: string; tags: string[] }> {
+    const c = await this.registry.resolve(courseKey)
+    return { course: c.name, tags: await this.registry.setTags(c.name, tags) }
+  }
+
+  async setQuestionTags(courseKey: string, node: string, qid: string, tags: string[]): Promise<{ course: string; node: string; qid: string; tags: string[] }> {
+    const c = await this.registry.resolve(courseKey)
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { tags })
+    return { course: c.name, node, qid, tags }
+  }
+
+  /** 全部题库条目（题目管理列表；不含答案）。 */
+  async questionsAll(courseKey?: string): Promise<{ total: number; questions: Array<Record<string, unknown>> }> {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled()
+    const out: Array<Record<string, unknown>> = []
+    for (const c of courses) {
+      let files: string[] = []
+      try {
+        files = await readdir(this.paths.bankDir(c.root))
+      } catch {
+        continue
+      }
+      for (const f of files.filter(f => f.endsWith('.yaml')).sort()) {
+        const node = f.replace(/\.yaml$/, '')
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
+        bank.questions.forEach((q, i) => {
+          out.push({
+            course: c.name, node, qid: q.id, no: i + 1, kind: q.kind, q: q.q,
+            difficulty: q.difficulty ?? 1, tags: q.tags ?? [],
+            archived: q.archived === true, hasExplanation: Boolean(q.explanation),
+            ...(q.options?.length ? { options: q.options } : {}),
+          })
+        })
+      }
+    }
+    return { total: out.length, questions: out }
+  }
+
+  async questionAdd(courseKey: string, node: string, question: Record<string, unknown>): Promise<{ course: string; node: string; id: string; count: number }> {
+    const c = await this.registry.resolve(courseKey)
+    const r = await this.bank.addQuestion(this.paths.courseRoot(c.root), node, question)
+    return { course: c.name, node, ...r }
+  }
+
+  async questionUpdate(courseKey: string, node: string, qid: string, patch: Record<string, unknown>): Promise<{ course: string; node: string; qid: string }> {
+    const c = await this.registry.resolve(courseKey)
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, patch)
+    return { course: c.name, node, qid }
+  }
+
+  async questionArchive(courseKey: string, node: string, qid: string, archived: boolean): Promise<{ course: string; node: string; qid: string; archived: boolean }> {
+    const c = await this.registry.resolve(courseKey)
+    await this.bank.archiveQuestion(this.paths.courseRoot(c.root), node, qid, archived)
+    return { course: c.name, node, qid, archived }
+  }
+
+  /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
+  async courseDelete(courseKey: string): Promise<{ removed: string; trash: string }> {
+    const c = await this.registry.get(courseKey)
+    if (!c) throw new Error(`[learnhub] 注册表中没有课程「${courseKey}」。`)
+    const rest = (await this.registry.load()).filter(x => x.name !== c.name && x.id !== c.id)
+    await this.registry.save(rest)
+    const src = this.paths.courseRoot(c.root)
+    const trash = `${this.paths.trashDir}/${c.root}-${Date.now()}`
+    if (existsSync(src)) {
+      await mkdir(this.paths.trashDir, { recursive: true })
+      await rename(src, trash)
+    }
+    return { removed: c.name, trash }
+  }
+
+  /** 为课程缺笔记的节点补骨架文件（幂等；存量课程修复/维护用）。 */
+  async ensureAllNotes(courseKey?: string): Promise<{ courses: Array<{ course: string; created: number }> }> {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled()
+    const out: Array<{ course: string; created: number }> = []
+    for (const c of courses) {
+      const { graph } = await this.loadView(c)
+      const created = await this.proposals.ensureNotesFor(c.root, graph.regions)
+      out.push({ course: c.name, created })
+    }
+    return { courses: out }
   }
 
   // ---- utils ----

@@ -1,0 +1,42 @@
+/* 面板全局样式（面板运行在 dsh web 的 iframe 内，浅色为主） */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--color-bg-1, #fff);
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px 24px;
+}
+
+.app-body.no-pad {
+  padding: 0;
+}
+
+/* React Flow 容器必须有显式高度 */
+.dag-wrap {
+  width: 100%;
+  height: 100%;
+}
+
+/* 节点抽屉里的 Markdown 粗排（lesson 正文是 Obsidian md 片段） */
+.md-body h1, .md-body h2, .md-body h3 { margin: 12px 0 6px; font-weight: 600; }
+.md-body p { margin: 6px 0; line-height: 1.7; }
+.md-body ul, .md-body ol { padding-left: 22px; margin: 6px 0; }
+.md-body code { background: var(--color-fill-2, #f2f3f5); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.md-body pre { background: var(--color-fill-2, #f2f3f5); padding: 10px; border-radius: 6px; overflow: auto; }
+.md-body blockquote { border-left: 3px solid var(--color-border-2, #e5e6eb); margin: 8px 0; padding: 2px 10px; color: var(--color-text-2, #4e5969); }
+
+/* 日历热力图 */
+.heat-cell { width: 100%; aspect-ratio: 1; border-radius: 3px; }

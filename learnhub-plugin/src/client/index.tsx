@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 
 /**
  * dsh-learnhub 客户端：侧边栏底栏「学习中心」入口 + 全屏面板。
- * 面板以 iframe 嵌入 host 插件伺服的 /learnhub 独立页（仪表盘 + 做题面板），
- * 页面本体改动无需重建客户端（host 每次请求现读 web/index.html）。
+ * 面板以 iframe 嵌入 host 插件伺服的 /learnhub SPA（ui/ 构建产物），
+ * 页面本体改动无需重建客户端（host 每次请求现读 web/dist）。
  * 架构参照 dsh-worktable：slots 座位注入 + ModuleLoader 单文件 bundle。
  */
 

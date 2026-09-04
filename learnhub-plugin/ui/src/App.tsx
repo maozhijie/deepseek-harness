@@ -1,0 +1,114 @@
+import { Button, Empty, Message, Result, Spin, Tabs } from '@arco-design/web-react'
+import { useCallback, useEffect, useState } from 'react'
+import { api } from './api'
+import BankPage from './pages/BankPage'
+import GeneratePage from './pages/GeneratePage'
+import GraphPage from './pages/GraphPage'
+import LearnPage from './pages/LearnPage'
+import ProposalsPage from './pages/ProposalsPage'
+import StatsPage from './pages/StatsPage'
+import type { StatusDoc, TreeDoc } from './types'
+
+export type TabKey = 'learn' | 'graph' | 'bank' | 'stats' | 'generate' | 'proposals'
+
+/** 全局共享态：状态总览 + 课程树 + 当前课程 + 页签跳转。 */
+export interface AppFrame {
+  status: StatusDoc | null
+  tree: TreeDoc | null
+  course: string | null
+  setCourse: (c: string) => void
+  goto: (tab: TabKey) => void
+  reload: () => Promise<void>
+  loading: boolean
+}
+
+export default function App() {
+  const [tab, setTab] = useState<TabKey>('learn')
+  const [status, setStatus] = useState<StatusDoc | null>(null)
+  const [tree, setTree] = useState<TreeDoc | null>(null)
+  const [course, setCourse] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [fatal, setFatal] = useState<string | null>(null)
+
+  const reload = useCallback(async () => {
+    try {
+      const [s, t] = await Promise.all([api.status(), api.coursesTree()])
+      setStatus(s)
+      setTree(t)
+      // 当前课程被删/停用时回落到第一门启用课程
+      setCourse(prev => {
+        const names = t.courses.map(c => c.name)
+        if (prev && names.includes(prev)) return prev
+        return names[0] ?? null
+      })
+      setFatal(null)
+    } catch (err) {
+      setFatal(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void reload() }, [reload])
+
+  if (loading && !status) {
+    return <div className='app-shell'><div style={{ margin: 'auto' }}><Spin dot /></div></div>
+  }
+  if (fatal && !status) {
+    return (
+      <div className='app-shell' style={{ justifyContent: 'center' }}>
+        <Result status='error' title='面板加载失败' subTitle={fatal}
+          extra={<Button type='primary' onClick={() => { setLoading(true); void reload() }}>重试</Button>} />
+      </div>
+    )
+  }
+
+  const frame: AppFrame = {
+    status, tree, course,
+    setCourse: c => setCourse(c),
+    goto: t => setTab(t),
+    reload,
+    loading,
+  }
+  const noCourse = !tree || tree.courses.length === 0
+
+  return (
+    <div className='app-shell'>
+      <Tabs activeTab={tab} onChange={k => setTab(k as TabKey)} type='capsule' size='small'
+        style={{ padding: '8px 12px 0', borderBottom: '1px solid var(--color-border-2,#e5e6eb)' }}>
+        <Tabs.TabPane key='learn' title='学习' />
+        <Tabs.TabPane key='graph' title='学习图' />
+        <Tabs.TabPane key='bank' title='题目管理' />
+        <Tabs.TabPane key='stats' title='统计' />
+        <Tabs.TabPane key='generate' title='生成' />
+        <Tabs.TabPane key='proposals' title='提案' />
+      </Tabs>
+      <div className={`app-body${tab === 'graph' ? ' no-pad' : ''}`}>
+        {tab !== 'learn' && noCourse ? (
+          <div style={{ paddingTop: 60, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+            <Empty description='还没有课程：先在 dsh 里让 agent 按 learnhub-graph-generate 技能多轮生成课程图' />
+            <Button type='primary' onClick={() => setTab('learn')}>回到学习页</Button>
+          </div>
+        ) : (
+          <TabBody tab={tab} frame={frame} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TabBody({ tab, frame }: { tab: TabKey; frame: AppFrame }) {
+  switch (tab) {
+    case 'learn': return <LearnPage frame={frame} />
+    case 'graph': return <GraphPage frame={frame} />
+    case 'bank': return <BankPage frame={frame} />
+    case 'stats': return <StatsPage frame={frame} />
+    case 'generate': return <GeneratePage />
+    case 'proposals': return <ProposalsPage />
+    default: return null
+  }
+}
+
+export function toastError(err: unknown) {
+  Message.error(err instanceof Error ? err.message : String(err))
+}

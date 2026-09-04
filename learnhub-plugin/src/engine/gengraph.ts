@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs'
 import { YAML } from './yaml.ts'
 import { atomicWrite } from './store.ts'
 import { Graph, GraphStore, structureCheck, loadRegionDoc, snapshotDoc } from './graph.ts'
+import { saveNote, defaultFrontmatter } from './notes.ts'
 import type { GRegion, GBlock, GNode } from './types.ts'
 import type { Paths } from './paths.ts'
 import type { Store } from './store.ts'
@@ -144,6 +145,23 @@ export class GraphProposals {
     private centerRoot: string,
   ) {}
 
+  /** 为图中缺笔记的节点补骨架文件（幂等）：gen/edit apply 落图后调用。
+   * 节点存在于图就该有 frontmatter 文件——vault 笔记是调度状态的事实源。 */
+  async ensureNotesFor(root: string, regions: GRegion[]): Promise<number> {
+    let created = 0
+    for (const r of regions) {
+      for (const b of r.blocks) {
+        for (const n of b.nodes) {
+          const path = this.paths.courseNotePath(root, r.name, n.name)
+          if (existsSync(path)) continue
+          await saveNote(path, defaultFrontmatter(n.name) as unknown as Record<string, unknown>, '> 内容待生成。\n')
+          created++
+        }
+      }
+    }
+    return created
+  }
+
   /** 提案产物 YAML 落盘（全留痕）→ artifact 路径。 */
   private async saveArtifact(kind: string, course: string, doc: unknown): Promise<{ pid: number; path: string }> {
     const pid = await this.store.createProposal(kind as 'gen' | 'edit', course, '', '')
@@ -218,6 +236,7 @@ export class GraphProposals {
     const regions = await store.load()
     const version = (await this.store.latestSnapshotVersion(course.name)) + 1
     await this.store.saveSnapshot(course.name, version, snapshotDoc(store, regions))
+    await this.ensureNotesFor(root, regions)
     await this.store.appendJournal({ course: course.name, node: '*', rating: null, kind: 'graph_gen', elapsed_days: 0, session: String(prop.id), detail: `新增区: ${written.join('、')}` })
     await this.store.updateProposal(prop.id, { status: 'applied', decided: new Date().toISOString(), decision_note: `快照 v${version}` })
     return { course: course.name, regions: written, snapshot: version, nodes: new Graph(regions).names.length }
@@ -293,6 +312,7 @@ export class GraphProposals {
     const regions2 = await store.load()
     const version = (await this.store.latestSnapshotVersion(course.name)) + 1
     await this.store.saveSnapshot(course.name, version, snapshotDoc(store, regions2))
+    await this.ensureNotesFor(root, regions2)
     await this.store.appendJournal({
       course: course.name, node: '*', rating: null, kind: 'graph_edit', elapsed_days: 0,
       session: String(prop.id), detail: spec.ops.map(o => `${o.op}(${o.node})`).join('；'),

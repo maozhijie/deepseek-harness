@@ -47,7 +47,7 @@ export interface GBlock { name: string; nodes: GNode[] }
 export interface GRegion { name: string; color: string; blocks: GBlock[] }
 
 /** 课程注册表条目（registry.load 同构）。 */
-export interface CourseEntry { id?: string; name: string; root: string; enabled?: boolean }
+export interface CourseEntry { id?: string; name: string; root: string; enabled?: boolean; tags?: string[] }
 
 /** journal 流水条目（journal.append 同构）。 */
 export interface JournalRec {

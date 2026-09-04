@@ -33,6 +33,7 @@ export class Paths {
   get recoveryStatePath(): string { return `${this.centerStateDir}/recovery_state.json` }
   get runLogPath(): string { return `${this.centerStateDir}/运行日志.md` }
   get promptDir(): string { return `${this.centerStateDir}/提示词` }
+  get trashDir(): string { return `${this.centerRoot}/.trash` }
 
   sessionPath(dateStr: string): string { return `${this.sessionDir}/${dateStr}.md` }
 
@@ -46,6 +47,8 @@ export class Paths {
 
   // ---- 课程级 ----
   courseRoot(root: string): string { return `${this.centerRoot}/${root}` }
+  /** 题库目录（question-bank 的 <课程根>/题库/<节点>.yaml）。 */
+  bankDir(root: string): string { return `${this.courseRoot(root)}/题库` }
   dataDir(root: string): string { return `${this.courseRoot(root)}/data` }
   courseDir(root: string): string { return `${this.courseRoot(root)}/课程` }
   statusPath(root: string): string { return `${this.courseRoot(root)}/进度.md` }

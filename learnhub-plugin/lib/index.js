@@ -103,6 +103,9 @@ var init_paths = __esm({
       get promptDir() {
         return `${this.centerStateDir}/\u63D0\u793A\u8BCD`;
       }
+      get trashDir() {
+        return `${this.centerRoot}/.trash`;
+      }
       sessionPath(dateStr) {
         return `${this.sessionDir}/${dateStr}.md`;
       }
@@ -115,6 +118,10 @@ var init_paths = __esm({
       // ---- 课程级 ----
       courseRoot(root) {
         return `${this.centerRoot}/${root}`;
+      }
+      /** 题库目录（question-bank 的 <课程根>/题库/<节点>.yaml）。 */
+      bankDir(root) {
+        return `${this.courseRoot(root)}/\u9898\u5E93`;
       }
       dataDir(root) {
         return `${this.courseRoot(root)}/data`;
@@ -4109,10 +4116,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key, sep, value } = collItem;
+        const { start, key, sep: sep2, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key ?? sep?.[0],
+          next: key ?? sep2?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -4126,7 +4133,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key && key.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep) {
+          if (!keyProps.anchor && !keyProps.tag && !sep2) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map.comment)
@@ -4150,7 +4157,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep ?? [], {
+        const valueProps = resolveProps.resolveProps(sep2 ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -4166,7 +4173,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep2, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -4257,7 +4264,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep = "";
+        let sep2 = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -4271,13 +4278,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep + cb;
-              sep = "";
+                comment += sep2 + cb;
+              sep2 = "";
               break;
             }
             case "newline":
               if (comment)
-                sep += source;
+                sep2 += source;
               hasSpace = true;
               break;
             default:
@@ -4320,18 +4327,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key, sep, value } = collItem;
+        const { start, key, sep: sep2, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key ?? sep?.[0],
+          next: key ?? sep2?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep && !value) {
+          if (!props.anchor && !props.tag && !sep2 && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -4385,8 +4392,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep, null, props, onError);
+        if (!isMap && !sep2 && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep2, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -4398,7 +4405,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep ?? [], {
+          const valueProps = resolveProps.resolveProps(sep2 ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -4409,8 +4416,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep)
-                for (const st of sep) {
+              if (sep2)
+                for (const st of sep2) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -4427,7 +4434,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep2, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -4607,7 +4614,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep = "";
+      let sep2 = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -4624,24 +4631,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep + indent.slice(trimIndent) + content;
-          sep = "\n";
+          value += sep2 + indent.slice(trimIndent) + content;
+          sep2 = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep === " ")
-            sep = "\n";
-          else if (!prevMoreIndented && sep === "\n")
-            sep = "\n\n";
-          value += sep + indent.slice(trimIndent) + content;
-          sep = "\n";
+          if (sep2 === " ")
+            sep2 = "\n";
+          else if (!prevMoreIndented && sep2 === "\n")
+            sep2 = "\n\n";
+          value += sep2 + indent.slice(trimIndent) + content;
+          sep2 = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep === "\n")
+          if (sep2 === "\n")
             value += "\n";
           else
-            sep = "\n";
+            sep2 = "\n";
         } else {
-          value += sep + content;
-          sep = " ";
+          value += sep2 + content;
+          sep2 = " ";
           prevMoreIndented = false;
         }
       }
@@ -4823,25 +4830,25 @@ var require_resolve_flow_scalar = __commonJS({
       if (!match)
         return source;
       let res = match[1];
-      let sep = " ";
+      let sep2 = " ";
       let pos = first.lastIndex;
       line.lastIndex = pos;
       while (match = line.exec(source)) {
         if (match[1] === "") {
-          if (sep === "\n")
-            res += sep;
+          if (sep2 === "\n")
+            res += sep2;
           else
-            sep = "\n";
+            sep2 = "\n";
         } else {
-          res += sep + match[1];
-          sep = " ";
+          res += sep2 + match[1];
+          sep2 = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep + (match?.[1] ?? "");
+      return res + sep2 + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -5651,14 +5658,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key, sep, value }) {
+    function stringifyItem({ start, key, sep: sep2, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key)
         res += stringifyToken(key);
-      if (sep)
-        for (const st of sep)
+      if (sep2)
+        for (const st of sep2)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -6825,18 +6832,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep;
+          let sep2;
           if (scalar.end) {
-            sep = scalar.end;
-            sep.push(this.sourceToken);
+            sep2 = scalar.end;
+            sep2.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep = [this.sourceToken];
+            sep2 = [this.sourceToken];
           const map = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep }]
+            items: [{ start, key: scalar, sep: sep2 }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map;
@@ -6989,15 +6996,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key = it.key;
-                  const sep = it.sep;
-                  sep.push(this.sourceToken);
+                  const sep2 = it.sep;
+                  sep2.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key, sep }]
+                    items: [{ start: start2, key, sep: sep2 }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -7191,13 +7198,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep = fc.end.splice(1, fc.end.length);
-            sep.push(this.sourceToken);
+            const sep2 = fc.end.splice(1, fc.end.length);
+            sep2.push(this.sourceToken);
             const map = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep }]
+              items: [{ start, key: fc, sep: sep2 }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map;
@@ -7575,6 +7582,25 @@ var init_store = __esm({
         const lines = await this.readJsonl(this.paths.journalPath);
         return course ? lines.filter((r) => r.course === course).length : lines.length;
       }
+      /** 学习行为按日聚合（journal + practice；ts 为本地时间 ISO，slice(0,10) 即本地日）。
+       * 打卡/日历热力图的数据源——行为流水即事实，零新增文件。 */
+      async activityCounts() {
+        const [journal, practice] = await Promise.all([
+          this.readJsonl(this.paths.journalPath),
+          this.readJsonl(this.paths.practicePath)
+        ]);
+        const byDay = {};
+        const bump = (ts, key) => {
+          if (!ts) return;
+          const day = ts.slice(0, 10);
+          const slot = byDay[day] ?? (byDay[day] = { journal: 0, practice: 0, total: 0 });
+          slot[key] += 1;
+          slot.total += 1;
+        };
+        for (const r of journal) bump(r.ts, "journal");
+        for (const r of practice) bump(r.ts, "practice");
+        return byDay;
+      }
       // ---- practice ----
       /** 追加一条作答记录。 */
       async appendPractice(rec) {
@@ -7667,9 +7693,9 @@ var init_store = __esm({
       async latestSnapshotVersion(course) {
         const dir = this.paths.snapshotDir;
         if (!existsSync(dir)) return 0;
-        const { readdir: readdir3 } = await import("node:fs/promises");
+        const { readdir: readdir4 } = await import("node:fs/promises");
         let max = 0;
-        for (const f of await readdir3(dir)) {
+        for (const f of await readdir4(dir)) {
           const m = f.match(new RegExp(`^${course}-v(\\d+)\\.json$`));
           if (m) max = Math.max(max, Number(m[1]));
         }
@@ -7839,12 +7865,14 @@ var init_notes = __esm({
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync as existsSync7 } from "node:fs";
-import { readFile as readFile10, writeFile as writeFile9, appendFile as appendFile2, mkdir as mkdir9 } from "node:fs/promises";
+import { readFile as readFile11, writeFile as writeFile9, appendFile as appendFile2, mkdir as mkdir10 } from "node:fs/promises";
+import { join as join3, resolve as resolvePath, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // src/engine/index.ts
 init_paths();
 import { existsSync as existsSync6 } from "node:fs";
-import { readFile as readFile9 } from "node:fs/promises";
+import { mkdir as mkdir9, readdir as readdir3, readFile as readFile10, rename as rename3 } from "node:fs/promises";
 
 // src/engine/registry.ts
 init_yaml();
@@ -7880,6 +7908,17 @@ var Registry = class {
   /** 全部启用中的课程（保序）。 */
   async enabled() {
     return (await this.load()).filter((c) => c.enabled !== false);
+  }
+  /** 设置课程标签（整体替换；空数组移除字段，保持注册表干净）。 */
+  async setTags(courseKey, tags) {
+    const courses = await this.load();
+    const hit = courses.find((c) => courseKey === c.name || courseKey === c.id);
+    if (!hit) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseKey}\u300D\u3002`);
+    const clean = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
+    if (clean.length) hit.tags = clean;
+    else delete hit.tags;
+    await this.save(courses);
+    return clean;
   }
   /** CLI 课程选择语义：显式指定 → 精确匹配；未指定 → 唯一启用课程。 */
   async resolve(key) {
@@ -11033,6 +11072,7 @@ init_yaml();
 init_store();
 import { readFile as readFile7, writeFile as writeFile6, rename as rename2, mkdir as mkdir6, unlink } from "node:fs/promises";
 import { existsSync as existsSync3 } from "node:fs";
+init_notes();
 var EDIT_OPS = ["add_node", "del_node", "set_pre", "rename", "move", "set_note"];
 function nonempty(v, what) {
   if (typeof v !== "string" || !v.trim()) throw new Error(`${what} \u4E0D\u80FD\u4E3A\u7A7A`);
@@ -11139,6 +11179,22 @@ var GraphProposals = class {
     this.registry = registry;
     this.centerRoot = centerRoot;
   }
+  /** 为图中缺笔记的节点补骨架文件（幂等）：gen/edit apply 落图后调用。
+   * 节点存在于图就该有 frontmatter 文件——vault 笔记是调度状态的事实源。 */
+  async ensureNotesFor(root, regions) {
+    let created = 0;
+    for (const r of regions) {
+      for (const b of r.blocks) {
+        for (const n of b.nodes) {
+          const path = this.paths.courseNotePath(root, r.name, n.name);
+          if (existsSync3(path)) continue;
+          await saveNote(path, defaultFrontmatter(n.name), "> \u5185\u5BB9\u5F85\u751F\u6210\u3002\n");
+          created++;
+        }
+      }
+    }
+    return created;
+  }
   /** 提案产物 YAML 落盘（全留痕）→ artifact 路径。 */
   async saveArtifact(kind, course, doc) {
     const pid = await this.store.createProposal(kind, course, "", "");
@@ -11208,6 +11264,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
     const regions = await store.load();
     const version2 = await this.store.latestSnapshotVersion(course.name) + 1;
     await this.store.saveSnapshot(course.name, version2, snapshotDoc(store, regions));
+    await this.ensureNotesFor(root, regions);
     await this.store.appendJournal({ course: course.name, node: "*", rating: null, kind: "graph_gen", elapsed_days: 0, session: String(prop.id), detail: `\u65B0\u589E\u533A: ${written.join("\u3001")}` });
     await this.store.updateProposal(prop.id, { status: "applied", decided: (/* @__PURE__ */ new Date()).toISOString(), decision_note: `\u5FEB\u7167 v${version2}` });
     return { course: course.name, regions: written, snapshot: version2, nodes: new Graph(regions).names.length };
@@ -11276,6 +11333,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
     const regions2 = await store.load();
     const version2 = await this.store.latestSnapshotVersion(course.name) + 1;
     await this.store.saveSnapshot(course.name, version2, snapshotDoc(store, regions2));
+    await this.ensureNotesFor(root, regions2);
     await this.store.appendJournal({
       course: course.name,
       node: "*",
@@ -11504,8 +11562,7 @@ function applyOpsToRegions(regions, ops) {
 // src/engine/question-bank.ts
 init_yaml();
 import { existsSync as existsSync4 } from "node:fs";
-import { mkdir as mkdir7 } from "node:fs/promises";
-import { writeFile as writeFile7 } from "node:fs/promises";
+import { mkdir as mkdir7, readFile as readFile8, writeFile as writeFile7 } from "node:fs/promises";
 init_paths();
 var KINDS = ["single_choice", "true_false", "fill_in_blank", "reflection"];
 function validateBank(doc, expectedNode) {
@@ -11566,7 +11623,9 @@ function validateBank(doc, expectedNode) {
         ...Array.isArray(e.options) && e.options.length ? { options: e.options.map(String) } : {},
         ...typeof e.explanation === "string" && e.explanation ? { explanation: e.explanation } : {},
         ...e.difficulty !== void 0 && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {},
-        ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {}
+        ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {},
+        ...Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {},
+        ...e.archived === true ? { archived: true } : {}
       });
     });
   }
@@ -11608,11 +11667,72 @@ ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     await writeFile7(p, YAML.stringify(doc), "utf8");
     return { node: spec.node, count: spec.questions.length, path: p };
   }
+  // ---- 单题操作（题目管理面板用；每次写回前全量过 validateBank 门禁）----
+  /** 读题库原始 YAML 文档（缺失/损坏返回 null）。 */
+  async loadDoc(courseRoot, node) {
+    const p = this.bankPath(courseRoot, node);
+    if (!existsSync4(p)) return null;
+    try {
+      const doc = YAML.parse(await readFile8(p, "utf8"));
+      return typeof doc === "object" && doc !== null ? doc : null;
+    } catch {
+      return null;
+    }
+  }
+  async writeDoc(courseRoot, node, doc) {
+    const p = this.bankPath(courseRoot, node);
+    await mkdir7(p.replace(/[/\\][^/\\]+$/, ""), { recursive: true });
+    await writeFile7(p, YAML.stringify(doc), "utf8");
+  }
+  /** 追加单题 → 新题 id 与题库总题数。 */
+  async addQuestion(courseRoot, node, question) {
+    const doc = await this.loadDoc(courseRoot, node) ?? { node, questions: [] };
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const id = typeof question.id === "string" && question.id.trim() ? question.id.trim() : `q${list.length + 1}`;
+    if (list.some((q) => q.id === id)) {
+      throw new Error(`[question-add] \u9898\u76EE id\u300C${id}\u300D\u5DF2\u5B58\u5728\u3002`);
+    }
+    const next = [...list, { ...question, id }];
+    const v = validateBank({ ...doc, questions: next }, node);
+    if (v.errors) throw new Error(`[question-add] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next });
+    return { id, count: next.length };
+  }
+  /** 更新单题字段（patch 合并；id 不可改）。 */
+  async updateQuestion(courseRoot, node, qid, patch) {
+    const doc = await this.loadDoc(courseRoot, node);
+    if (!doc) throw new Error(`[question-update] ${node} \u6CA1\u6709\u9898\u5E93\u6587\u4EF6\u3002`);
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const idx = list.findIndex((q) => q.id === qid);
+    if (idx < 0) throw new Error(`[question-update] ${node} \u7684\u9898\u5E93\u6CA1\u6709 ${qid}\u3002`);
+    const merged = { ...list[idx], ...patch, id: qid };
+    const next = [...list];
+    next[idx] = merged;
+    const v = validateBank({ ...doc, questions: next }, node);
+    if (v.errors) throw new Error(`[question-update] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: next });
+  }
+  /** 归档/取消归档单题（归档题在 questionsAll 里仍可见并带标记，作答侧过滤）。 */
+  async archiveQuestion(courseRoot, node, qid, archived) {
+    const doc = await this.loadDoc(courseRoot, node);
+    if (!doc) throw new Error(`[question-archive] ${node} \u6CA1\u6709\u9898\u5E93\u6587\u4EF6\u3002`);
+    const list = Array.isArray(doc.questions) ? doc.questions : [];
+    const hit = list.find((q) => q.id === qid);
+    if (!hit) throw new Error(`[question-archive] ${node} \u7684\u9898\u5E93\u6CA1\u6709 ${qid}\u3002`);
+    if (archived) hit.archived = true;
+    else delete hit.archived;
+    const v = validateBank({ ...doc, questions: list }, node);
+    if (v.errors) throw new Error(`[question-archive] \u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u5199\u5165\u3002
+${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
+    await this.writeDoc(courseRoot, node, { ...doc, questions: list });
+  }
 };
 
 // src/engine/sessions.ts
 init_dates();
-import { readFile as readFile8, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
+import { readFile as readFile9, writeFile as writeFile8, mkdir as mkdir8 } from "node:fs/promises";
 import { existsSync as existsSync5 } from "node:fs";
 init_notes();
 function doneSet(graph, state) {
@@ -11943,7 +12063,7 @@ var Sessions = class _Sessions {
   async today(enabled, minutes, today = todayStr()) {
     const path = this.paths.sessionPath(today);
     if (existsSync5(path)) {
-      const raw = await readFile8(path, "utf8");
+      const raw = await readFile9(path, "utf8");
       const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       if (m && /settled:\s*false/.test(m[1])) {
         return { message: `[today] \u4ECA\u65E5\u5DE5\u4F5C\u5355\u5DF2\u5B58\u5728\u4E14\u672A\u7ED3\u7B97\uFF0C\u76F4\u63A5\u7EE7\u7EED\u4F5C\u7B54: ${path}` };
@@ -11998,7 +12118,7 @@ var Sessions = class _Sessions {
     const ds = dateStr || today;
     const path = this.paths.sessionPath(ds);
     if (!existsSync5(path)) return { message: `[settle] \u672A\u627E\u5230\u4F1A\u8BDD\u5DE5\u4F5C\u5355: ${path}`, code: 1 };
-    const raw = await readFile8(path, "utf8");
+    const raw = await readFile9(path, "utf8");
     if (/^---[\s\S]*?settled:\s*true[\s\S]*?---/.test(raw)) {
       return { message: "[settle] \u8BE5\u4F1A\u8BDD\u5DF2\u7ED3\u7B97\u8FC7\uFF08\u5E42\u7B49\u4FDD\u62A4\uFF09\uFF0C\u8DF3\u8FC7\u3002", code: 0 };
     }
@@ -12521,7 +12641,7 @@ ${answer}`,
     const p = input.replace(/\\/g, "/");
     const rel = p.startsWith(`${vaultRoot}/`) ? p.slice(vaultRoot.length + 1) : p.replace(/^\/+/, "");
     const abs = `${vaultRoot}/${rel}`;
-    const raw = await readFile9(abs, "utf8");
+    const raw = await readFile10(abs, "utf8");
     const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const node = m ? (m[1].match(/^node:\s*(.+)$/m)?.[1] ?? "").trim() : "";
     if (!node) throw new Error(`${rel} \u7684 frontmatter \u7F3A\u5C11 node \u5B57\u6BB5\uFF0C\u4E0D\u662F\u8BFE\u7A0B\u6587\u4EF6\u3002`);
@@ -12534,7 +12654,7 @@ ${answer}`,
   }
   /** 提取笔记「内容反馈」区正文；仅占位符或为空返回 null。 */
   async feedbackBody(absPath) {
-    const raw = await readFile9(absPath, "utf8");
+    const raw = await readFile10(absPath, "utf8");
     const sec = raw.match(/## 内容反馈\n([\s\S]*?)(?=\n## |<!-- enc_candidates|$)/);
     const body = (sec?.[1] ?? "").replace(/在此写下你对本课内容的问题与建议.*$/m, "").trim();
     return body || null;
@@ -12581,7 +12701,7 @@ ${answer}`,
     return {
       course: c.name,
       node,
-      questions: bank.questions.map((q, i) => ({
+      questions: bank.questions.filter((q) => q.archived !== true).map((q, i) => ({
         id: q.id,
         kind: q.kind,
         q: q.q,
@@ -12663,6 +12783,124 @@ ${String(q.answer)}`,
       kind: q.kind
     };
   }
+  // ---- 学习面板扩展（打卡/日历/标签/题目管理/课程删除）----
+  /** 今日打卡状态（本地日；journal/practice 有行为即打卡，行为流水即事实）。 */
+  async checkinToday() {
+    const byDay = await this.store.activityCounts();
+    const today = byDay[todayStr()] ?? { journal: 0, practice: 0, total: 0 };
+    return { checked: today.total > 0, journal: today.journal, practice: today.practice, total: today.total };
+  }
+  /** 日历热力图数据（指定年；month 缺省=全年）。 */
+  async calendarStats(year, month) {
+    const byDay = await this.store.activityCounts();
+    const days = Object.entries(byDay).filter(([date]) => {
+      const m = date.match(/^(\d{4})-(\d{2})/);
+      if (!m || +m[1] !== year) return false;
+      return month === void 0 || +m[2] === month;
+    }).map(([date, c]) => ({ date, journal: c.journal, practice: c.practice, total: c.total })).sort((a, b) => a.date.localeCompare(b.date));
+    return { year, month: month ?? null, days };
+  }
+  /** 全中心标签聚合（课程 tags + 启用课程全部题库的题目 tags，去重排序）。 */
+  async listTags() {
+    const tags = /* @__PURE__ */ new Set();
+    const courses = await this.registry.enabled();
+    for (const c of courses) (c.tags ?? []).forEach((t) => tags.add(t));
+    for (const c of courses) {
+      let files = [];
+      try {
+        files = await readdir3(this.paths.bankDir(c.root));
+      } catch {
+        continue;
+      }
+      for (const f of files.filter((f2) => f2.endsWith(".yaml"))) {
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), f.replace(/\.yaml$/, ""));
+        bank.questions.forEach((q) => (q.tags ?? []).forEach((t) => tags.add(t)));
+      }
+    }
+    return [...tags].sort();
+  }
+  async setCourseTags(courseKey, tags) {
+    const c = await this.registry.resolve(courseKey);
+    return { course: c.name, tags: await this.registry.setTags(c.name, tags) };
+  }
+  async setQuestionTags(courseKey, node, qid, tags) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, { tags });
+    return { course: c.name, node, qid, tags };
+  }
+  /** 全部题库条目（题目管理列表；不含答案）。 */
+  async questionsAll(courseKey) {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled();
+    const out = [];
+    for (const c of courses) {
+      let files = [];
+      try {
+        files = await readdir3(this.paths.bankDir(c.root));
+      } catch {
+        continue;
+      }
+      for (const f of files.filter((f2) => f2.endsWith(".yaml")).sort()) {
+        const node = f.replace(/\.yaml$/, "");
+        const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+        bank.questions.forEach((q, i) => {
+          out.push({
+            course: c.name,
+            node,
+            qid: q.id,
+            no: i + 1,
+            kind: q.kind,
+            q: q.q,
+            difficulty: q.difficulty ?? 1,
+            tags: q.tags ?? [],
+            archived: q.archived === true,
+            hasExplanation: Boolean(q.explanation),
+            ...q.options?.length ? { options: q.options } : {}
+          });
+        });
+      }
+    }
+    return { total: out.length, questions: out };
+  }
+  async questionAdd(courseKey, node, question) {
+    const c = await this.registry.resolve(courseKey);
+    const r = await this.bank.addQuestion(this.paths.courseRoot(c.root), node, question);
+    return { course: c.name, node, ...r };
+  }
+  async questionUpdate(courseKey, node, qid, patch) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, patch);
+    return { course: c.name, node, qid };
+  }
+  async questionArchive(courseKey, node, qid, archived) {
+    const c = await this.registry.resolve(courseKey);
+    await this.bank.archiveQuestion(this.paths.courseRoot(c.root), node, qid, archived);
+    return { course: c.name, node, qid, archived };
+  }
+  /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
+  async courseDelete(courseKey) {
+    const c = await this.registry.get(courseKey);
+    if (!c) throw new Error(`[learnhub] \u6CE8\u518C\u8868\u4E2D\u6CA1\u6709\u8BFE\u7A0B\u300C${courseKey}\u300D\u3002`);
+    const rest = (await this.registry.load()).filter((x) => x.name !== c.name && x.id !== c.id);
+    await this.registry.save(rest);
+    const src = this.paths.courseRoot(c.root);
+    const trash = `${this.paths.trashDir}/${c.root}-${Date.now()}`;
+    if (existsSync6(src)) {
+      await mkdir9(this.paths.trashDir, { recursive: true });
+      await rename3(src, trash);
+    }
+    return { removed: c.name, trash };
+  }
+  /** 为课程缺笔记的节点补骨架文件（幂等；存量课程修复/维护用）。 */
+  async ensureAllNotes(courseKey) {
+    const courses = courseKey ? [await this.registry.resolve(courseKey)] : await this.registry.enabled();
+    const out = [];
+    for (const c of courses) {
+      const { graph } = await this.loadView(c);
+      const created = await this.proposals.ensureNotesFor(c.root, graph.regions);
+      out.push({ course: c.name, created });
+    }
+    return { courses: out };
+  }
   // ---- utils ----
   async updateNoteFm(path, fm) {
     const { body } = await loadNote(path);
@@ -12678,14 +12916,14 @@ ${String(q.answer)}`,
 var name = "dsh-learnhub";
 var inject = ["tools", "webServer", "llm"];
 var llmCfg = { provider: "deepseek-official", model: "deepseek-v4-flash" };
-var generating = /* @__PURE__ */ new Set();
+var genJobs = /* @__PURE__ */ new Map();
 var VAULT = "";
 var CENTER_REL = "\u5B66\u4E60\u4E2D\u5FC3";
 var engine;
 var LOG_LIMIT = 1500;
 var API = "/learnhub/api";
 var PAGE = "/learnhub";
-var PAGE_FILE = new URL("../web/index.html", import.meta.url);
+var PAGE_DIST = fileURLToPath(new URL("../web/dist/", import.meta.url));
 var FILE_MIME = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -12694,11 +12932,26 @@ var FILE_MIME = {
   ".webp": "image/webp",
   ".svg": "image/svg+xml"
 };
+var ASSET_MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8"
+};
 async function runLog(tool, output) {
   const path = `${engine.paths.centerStateDir}/\u8FD0\u884C\u65E5\u5FD7.md`;
   try {
     if (!existsSync7(path)) {
-      await mkdir9(engine.paths.centerStateDir, { recursive: true });
+      await mkdir10(engine.paths.centerStateDir, { recursive: true });
       await appendFile2(path, "# \u8FD0\u884C\u65E5\u5FD7\n\n> \u63D2\u4EF6\u8C03\u7528 learnhub \u5F15\u64CE\u7684\u8BB0\u5F55\u3002\u5F15\u64CE\u81EA\u52A8\u4EA7\u51FA\uFF0C\u52FF\u624B\u5DE5\u6539\u3002\n", "utf8");
     }
     const ts = (/* @__PURE__ */ new Date()).toLocaleString("sv-SE");
@@ -12718,6 +12971,11 @@ async function run(tool, fn) {
   await runLog(tool, out);
   return out;
 }
+async function apiRun(tool, fn) {
+  const out = await fn();
+  await runLog(tool, typeof out === "string" ? out : JSON.stringify(out));
+  return out;
+}
 function unwrapLink(s) {
   const m = s.trim().match(/^\[\[(.+?)(?:\|(.+?))?\]\]$/);
   if (!m) return s.trim();
@@ -12729,7 +12987,7 @@ async function writeBack(course, node, rating) {
   const path = engine.paths.sessionPath(today);
   let raw;
   try {
-    raw = await readFile10(path, "utf8");
+    raw = await readFile11(path, "utf8");
   } catch {
     return { ok: false, message: "\u4ECA\u65E5\u5DE5\u4F5C\u5355\u4E0D\u5B58\u5728\uFF0C\u5148\u300C\u751F\u6210\u4ECA\u65E5\u5DE5\u4F5C\u5355\u300D\u3002" };
   }
@@ -12784,8 +13042,12 @@ function stripFences(body) {
 }
 async function generateContent(ctx, course, node) {
   const key = `${course}/${node}`;
-  if (generating.has(key)) throw new Error(`\u300C${node}\u300D\u6B63\u5728\u751F\u6210\u4E2D\uFF0C\u8BF7\u7A0D\u5019\u3002`);
-  generating.add(key);
+  const existing = genJobs.get(key);
+  if (existing && (existing.status === "running" || existing.status === "cancelling")) {
+    throw new Error(`\u300C${node}\u300D\u6B63\u5728\u751F\u6210\u4E2D\uFF0C\u8BF7\u7A0D\u5019\u3002`);
+  }
+  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running" };
+  genJobs.set(key, job);
   try {
     const pack = await engine.contentPack(course, node);
     const tpl = await engine.loadPrompt("\u8BFE\u7A0B\u751F\u6210");
@@ -12794,11 +13056,30 @@ async function generateContent(ctx, course, node) {
 ---
 
 ${pack}`));
+    if (job.status === "cancelling") throw new Error("\u751F\u6210\u5DF2\u53D6\u6D88\uFF0C\u7ED3\u679C\u5DF2\u4E22\u5F03\u3002");
     const res = await engine.contentApply(course, node, body);
+    job.status = "done";
+    job.message = res.message;
     return res.message;
+  } catch (err) {
+    job.status = job.status === "cancelling" ? "cancelled" : "failed";
+    job.message = err instanceof Error ? err.message : String(err);
+    throw err;
   } finally {
-    generating.delete(key);
+    setTimeout(() => {
+      const j = genJobs.get(key);
+      if (j && j.status !== "running" && j.status !== "cancelling") genJobs.delete(key);
+    }, 5 * 6e4).unref();
   }
+}
+function generationStatus() {
+  return [...genJobs.entries()].map(([key, j]) => ({ key, ...j }));
+}
+function cancelGeneration(course, node) {
+  const job = genJobs.get(`${course}/${node}`);
+  if (!job) return { cancelled: false };
+  if (job.status === "running") job.status = "cancelling";
+  return { cancelled: true, status: job.status };
 }
 async function aiGrade(ctx, course, node, ex, answer) {
   return engine.aiGrade(async (prompt, system) => {
@@ -12838,7 +13119,7 @@ async function handleApi(ctx, req, res) {
   const route = url.pathname.slice(API.length);
   try {
     if (req.method === "GET" && route === "/status") {
-      sendJson(res, 200, await run("api/status", async () => JSON.stringify(await engine.statusJson())));
+      sendJson(res, 200, await apiRun("api/status", () => engine.statusJson()));
       return;
     }
     if (req.method === "GET" && route === "/courses") {
@@ -12854,35 +13135,35 @@ async function handleApi(ctx, req, res) {
       const node = url.searchParams.get("node");
       const course = url.searchParams.get("course");
       if (!node || !course) throw new Error("missing required field: node/course");
-      sendJson(res, 200, await run("api/exercises", async () => JSON.stringify(await engine.exercises(course, node))));
+      sendJson(res, 200, await apiRun("api/exercises", () => engine.exercises(course, node)));
       return;
     }
     if (req.method === "GET" && route === "/lesson") {
       const node = url.searchParams.get("node");
       if (!node) throw new Error("missing required field: node");
       const course = url.searchParams.get("course") ?? void 0;
-      sendJson(res, 200, await run("api/lesson", async () => JSON.stringify(await engine.lesson(course, node))));
+      sendJson(res, 200, await apiRun("api/lesson", () => engine.lesson(course, node)));
       return;
     }
     if (req.method === "GET" && route === "/recommend") {
       const limit = Number(url.searchParams.get("limit") ?? "5");
-      sendJson(res, 200, await run("api/recommend", async () => JSON.stringify(await engine.recommend(Number.isFinite(limit) ? limit : 5))));
+      sendJson(res, 200, await apiRun("api/recommend", () => engine.recommend(Number.isFinite(limit) ? limit : 5)));
       return;
     }
     if (req.method === "GET" && route === "/queue") {
-      sendJson(res, 200, await run("api/queue", async () => JSON.stringify(await engine.queueItemsAll())));
+      sendJson(res, 200, await apiRun("api/queue", () => engine.queueItemsAll()));
       return;
     }
     if (req.method === "GET" && route === "/courses/tree") {
       const course = url.searchParams.get("course") ?? void 0;
-      sendJson(res, 200, await run("api/courses/tree", async () => JSON.stringify(await engine.coursesTree(course))));
+      sendJson(res, 200, await apiRun("api/courses/tree", () => engine.coursesTree(course)));
       return;
     }
     if (req.method === "GET" && route === "/questions") {
       const node = url.searchParams.get("node");
       if (!node) throw new Error("missing required field: node");
       const course = url.searchParams.get("course") ?? void 0;
-      sendJson(res, 200, await run("api/questions", async () => JSON.stringify(await engine.questions(course, node))));
+      sendJson(res, 200, await apiRun("api/questions", () => engine.questions(course, node)));
       return;
     }
     if (req.method === "GET" && route === "/file") {
@@ -12895,7 +13176,7 @@ async function handleApi(ctx, req, res) {
       if (!mime) throw new Error(`unsupported file type: ${ext || "(none)"}`);
       let buf;
       try {
-        buf = await readFile10(`${VAULT}/${rel}`);
+        buf = await readFile11(`${VAULT}/${rel}`);
       } catch {
         sendJson(res, 404, { error: `file not found: ${rel}` });
         return;
@@ -12913,15 +13194,39 @@ async function handleApi(ctx, req, res) {
     if (req.method === "GET" && route === "/graph") {
       const course = url.searchParams.get("course") ?? void 0;
       const elementsOnly = url.searchParams.get("elements") === "1";
-      sendJson(res, 200, await run("api/graph", async () => JSON.stringify(await engine.graphAnalyze(course, elementsOnly))));
+      sendJson(res, 200, await apiRun("api/graph", () => engine.graphAnalyze(course, elementsOnly)));
       return;
     }
     if (req.method === "GET" && route === "/proposals") {
-      sendJson(res, 200, await run("api/proposals", async () => JSON.stringify(await engine.graphProposals())));
+      sendJson(res, 200, await apiRun("api/proposals", () => engine.graphProposals()));
       return;
     }
     if (req.method === "GET" && route === "/doctor") {
-      sendJson(res, 200, await run("api/doctor", async () => JSON.stringify(await engine.doctor())));
+      sendJson(res, 200, await apiRun("api/doctor", () => engine.doctor()));
+      return;
+    }
+    if (req.method === "GET" && route === "/checkins/today") {
+      sendJson(res, 200, await apiRun("api/checkins/today", () => engine.checkinToday()));
+      return;
+    }
+    if (req.method === "GET" && route === "/stats/calendar") {
+      const year = Number(url.searchParams.get("year")) || (/* @__PURE__ */ new Date()).getFullYear();
+      const monthRaw = url.searchParams.get("month");
+      const month = monthRaw && Number.isFinite(Number(monthRaw)) ? Number(monthRaw) : void 0;
+      sendJson(res, 200, await apiRun("api/stats/calendar", () => engine.calendarStats(year, month)));
+      return;
+    }
+    if (req.method === "GET" && route === "/tags") {
+      sendJson(res, 200, await apiRun("api/tags", () => engine.listTags()));
+      return;
+    }
+    if (req.method === "GET" && route === "/questions-all") {
+      const course = url.searchParams.get("course") ?? void 0;
+      sendJson(res, 200, await apiRun("api/questions-all", () => engine.questionsAll(course)));
+      return;
+    }
+    if (req.method === "GET" && route === "/generate/status") {
+      sendJson(res, 200, await apiRun("api/generate/status", () => generationStatus()));
       return;
     }
     if (req.method === "POST") {
@@ -13012,6 +13317,51 @@ async function handleApi(ctx, req, res) {
           need(body, "qid"),
           typeof body.answer === "string" ? body.answer : ""
         ));
+        return;
+      }
+      if (route === "/question-add") {
+        const q = body.question;
+        if (typeof q !== "object" || q === null) throw new Error("missing required field: question");
+        sendJson(res, 200, await engine.questionAdd(
+          need(body, "course"),
+          need(body, "node"),
+          q
+        ));
+        return;
+      }
+      if (route === "/question-archive") {
+        sendJson(res, 200, await engine.questionArchive(
+          need(body, "course"),
+          need(body, "node"),
+          need(body, "qid"),
+          body.archived === true
+        ));
+        return;
+      }
+      if (route === "/course/delete") {
+        sendJson(res, 200, await engine.courseDelete(need(body, "course")));
+        return;
+      }
+      if (route === "/generate/cancel") {
+        sendJson(res, 200, cancelGeneration(need(body, "course"), need(body, "node")));
+        return;
+      }
+    }
+    if (req.method === "PUT") {
+      const body = await readJson(req);
+      if (route === "/course/tags") {
+        const tags = Array.isArray(body.tags) ? body.tags.map(String) : [];
+        sendJson(res, 200, await apiRun("api/course/tags", () => engine.setCourseTags(need(body, "course"), tags)));
+        return;
+      }
+      if (route === "/question/tags") {
+        const tags = Array.isArray(body.tags) ? body.tags.map(String) : [];
+        sendJson(res, 200, await apiRun("api/question/tags", () => engine.setQuestionTags(need(body, "course"), need(body, "node"), need(body, "qid"), tags)));
+        return;
+      }
+      if (route === "/question-update") {
+        const patch = typeof body.patch === "object" && body.patch !== null ? body.patch : {};
+        sendJson(res, 200, await engine.questionUpdate(need(body, "course"), need(body, "node"), need(body, "qid"), patch));
         return;
       }
     }
@@ -13245,20 +13595,41 @@ function apply(ctx, config) {
   );
   ctx.effect(
     () => ctx.webServer.register({
-      kind: "exact",
+      kind: "prefix",
       path: PAGE,
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
         try {
-          const html = await readFile10(PAGE_FILE, "utf8");
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-          res.end(html);
+          const url = new URL(req.url ?? "/", "http://localhost");
+          if (url.pathname === PAGE) {
+            res.writeHead(301, { location: `${PAGE}/` });
+            res.end();
+            return;
+          }
+          const rel = decodeURIComponent(url.pathname.slice(PAGE.length).replace(/^\/+/, "")) || "index.html";
+          let file = resolvePath(PAGE_DIST, rel);
+          if (!(file + sep).startsWith(PAGE_DIST)) file = join3(PAGE_DIST, "index.html");
+          let data;
+          try {
+            data = await readFile11(file);
+          } catch {
+            file = join3(PAGE_DIST, "index.html");
+            data = await readFile11(file);
+          }
+          const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
+          const mime = ASSET_MIME[ext] ?? "application/octet-stream";
+          const immutable = rel.startsWith("assets/");
+          res.writeHead(200, {
+            "content-type": mime,
+            "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-store"
+          });
+          res.end(data);
         } catch (err) {
           res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-          res.end(`learnhub page missing: ${err instanceof Error ? err.message : String(err)}`);
+          res.end(`learnhub panel missing (build ui/ first: npm run build): ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }),
-    "learnhub: dashboard + practice page"
+    "learnhub: panel SPA (web/dist)"
   );
   console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 21 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`);
   void engine.statusJson().then((doc) => console.log(`[learnhub] self-check status OK (${JSON.stringify(doc).length} bytes)`)).catch((err) => console.error(`[learnhub] self-check FAILED: ${err instanceof Error ? err.message : String(err)}`));

@@ -5,7 +5,7 @@
  * src/engine/（TS）同进程承载，本文件只做三件事：
  * - agent 工具面：21 个 defineTool 直调 engine（工具名与语义与 v2 一致，题库四面为 v3 新增）
  * - HTTP 路由 /learnhub/api/*：面板后端，直调 engine
- * - /learnhub 独立面板页（伺服 web/index.html，改页面无需重建）+ /file 媒体路由
+ * - /learnhub 独立面板页（伺服 web/dist Vite SPA）+ /file 媒体路由
  *
  * 跨机器部署：vault/中心路径不硬编码，由 cordis 行 config 提供
  * （config.vault 必填；centerRel 缺省「学习中心」），机器差异写在
@@ -22,6 +22,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync } from 'node:fs'
 import { readFile, unlink, writeFile, appendFile, mkdir } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { join, resolve as resolvePath, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { LearnhubEngine } from './engine/index.ts'
 
 export const name = 'dsh-learnhub'
@@ -41,8 +43,17 @@ export interface LearnhubConfig {
 
 /** AI 调用的 provider/model（cordis 行 config 可覆盖，apply 时写入）。 */
 const llmCfg = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
-/** 进行中的课程生成任务（course/node 键，防重复触发）。 */
-const generating = new Set<string>()
+
+/** 课程生成任务注册表（course/node 键）：面板「生成」页签的状态源，
+ * 页面刷新后从这里恢复（allo 同语义：服务端注册表是事实来源）。 */
+interface GenJob {
+  course: string
+  node: string
+  startedAt: string
+  status: 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+  message?: string
+}
+const genJobs = new Map<string, GenJob>()
 
 let VAULT = ''
 let CENTER_REL = '学习中心'
@@ -52,14 +63,23 @@ let engine: LearnhubEngine
 const LOG_LIMIT = 1500
 /** 客户端面板的 HTTP 路由前缀。 */
 const API = '/learnhub/api'
-/** 独立面板页面路由（伺服 web/index.html）。 */
+/** 独立面板页面路由（伺服 web/dist）。 */
 const PAGE = '/learnhub'
-/** 面板页面源文件（每次请求现读，改 UI 无需重启）。 */
-const PAGE_FILE = new URL('../web/index.html', import.meta.url)
+/** 面板 SPA 构建产物目录（ui/ 经 vite build 产出；每次请求现读，改 UI 无需重启）。 */
+const PAGE_DIST = fileURLToPath(new URL('../web/dist/', import.meta.url))
 /** /file 路由允许伺服的二进制媒体扩展名 → MIME（课程插图等）。 */
 const FILE_MIME: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+}
+
+/** 面板 SPA 资产扩展名 → MIME。 */
+const ASSET_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf',
+  '.json': 'application/json; charset=utf-8', '.map': 'application/json; charset=utf-8',
 }
 
 /** 运行日志：每次引擎调用的记录（工具名 + 输出摘要）。 */
@@ -82,6 +102,14 @@ async function runLog(tool: string, output: string): Promise<void> {
 async function run(tool: string, fn: () => Promise<string>): Promise<string> {
   const out = await fn()
   await runLog(tool, out)
+  return out
+}
+
+/** 面板路由出口：引擎返回对象原样透传（sendJson 统一序列化一次），
+ * 日志记录序列化摘要。绝不在路由里手动 stringify 对象——会双编码。 */
+async function apiRun<T>(tool: string, fn: () => Promise<T>): Promise<T> {
+  const out = await fn()
+  await runLog(tool, typeof out === 'string' ? out : JSON.stringify(out))
   return out
 }
 
@@ -159,17 +187,44 @@ function stripFences(body: string): string {
 /** 课程生成管线：上下文包 + 提示词 → ctx.llm → 质检门 apply（draft 落盘）。 */
 async function generateContent(ctx: Context, course: string, node: string): Promise<string> {
   const key = `${course}/${node}`
-  if (generating.has(key)) throw new Error(`「${node}」正在生成中，请稍候。`)
-  generating.add(key)
+  const existing = genJobs.get(key)
+  if (existing && (existing.status === 'running' || existing.status === 'cancelling')) {
+    throw new Error(`「${node}」正在生成中，请稍候。`)
+  }
+  const job: GenJob = { course, node, startedAt: new Date().toISOString(), status: 'running' }
+  genJobs.set(key, job)
   try {
     const pack = await engine.contentPack(course, node)
     const tpl = await engine.loadPrompt('课程生成')
     const body = stripFences(await llmComplete(ctx, `${tpl}\n\n---\n\n${pack}`))
+    // 取消语义：置旗标后 LLM 结果直接丢弃（不落盘），模型调用自然跑完
+    if (job.status === 'cancelling') throw new Error('生成已取消，结果已丢弃。')
     const res = await engine.contentApply(course, node, body)
+    job.status = 'done'
+    job.message = res.message
     return res.message
+  } catch (err) {
+    job.status = job.status === 'cancelling' ? 'cancelled' : 'failed'
+    job.message = err instanceof Error ? err.message : String(err)
+    throw err
   } finally {
-    generating.delete(key)
+    // 终态保留 5 分钟供面板查看，之后清出注册表
+    setTimeout(() => {
+      const j = genJobs.get(key)
+      if (j && j.status !== 'running' && j.status !== 'cancelling') genJobs.delete(key)
+    }, 5 * 60_000).unref()
   }
+}
+
+function generationStatus(): Array<GenJob & { key: string }> {
+  return [...genJobs.entries()].map(([key, j]) => ({ key, ...j }))
+}
+
+function cancelGeneration(course: string, node: string): { cancelled: boolean; status?: string } {
+  const job = genJobs.get(`${course}/${node}`)
+  if (!job) return { cancelled: false }
+  if (job.status === 'running') job.status = 'cancelling'
+  return { cancelled: true, status: job.status }
 }
 
 /** AI 判卷（引擎 aiGrade：严格 JSON 解析 + 失败降级 + record-attempt）。 */
@@ -219,7 +274,7 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
   const route = url.pathname.slice(API.length)
   try {
     if (req.method === 'GET' && route === '/status') {
-      sendJson(res, 200, await run('api/status', async () => JSON.stringify(await engine.statusJson())))
+      sendJson(res, 200, await apiRun('api/status', () => engine.statusJson()))
       return
     }
     if (req.method === 'GET' && route === '/courses') {
@@ -233,35 +288,35 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       const node = url.searchParams.get('node')
       const course = url.searchParams.get('course')
       if (!node || !course) throw new Error('missing required field: node/course')
-      sendJson(res, 200, await run('api/exercises', async () => JSON.stringify(await engine.exercises(course, node))))
+      sendJson(res, 200, await apiRun('api/exercises', () => engine.exercises(course, node)))
       return
     }
     if (req.method === 'GET' && route === '/lesson') {
       const node = url.searchParams.get('node')
       if (!node) throw new Error('missing required field: node')
       const course = url.searchParams.get('course') ?? undefined
-      sendJson(res, 200, await run('api/lesson', async () => JSON.stringify(await engine.lesson(course, node))))
+      sendJson(res, 200, await apiRun('api/lesson', () => engine.lesson(course, node)))
       return
     }
     if (req.method === 'GET' && route === '/recommend') {
       const limit = Number(url.searchParams.get('limit') ?? '5')
-      sendJson(res, 200, await run('api/recommend', async () => JSON.stringify(await engine.recommend(Number.isFinite(limit) ? limit : 5))))
+      sendJson(res, 200, await apiRun('api/recommend', () => engine.recommend(Number.isFinite(limit) ? limit : 5)))
       return
     }
     if (req.method === 'GET' && route === '/queue') {
-      sendJson(res, 200, await run('api/queue', async () => JSON.stringify(await engine.queueItemsAll())))
+      sendJson(res, 200, await apiRun('api/queue', () => engine.queueItemsAll()))
       return
     }
     if (req.method === 'GET' && route === '/courses/tree') {
       const course = url.searchParams.get('course') ?? undefined
-      sendJson(res, 200, await run('api/courses/tree', async () => JSON.stringify(await engine.coursesTree(course))))
+      sendJson(res, 200, await apiRun('api/courses/tree', () => engine.coursesTree(course)))
       return
     }
     if (req.method === 'GET' && route === '/questions') {
       const node = url.searchParams.get('node')
       if (!node) throw new Error('missing required field: node')
       const course = url.searchParams.get('course') ?? undefined
-      sendJson(res, 200, await run('api/questions', async () => JSON.stringify(await engine.questions(course, node))))
+      sendJson(res, 200, await apiRun('api/questions', () => engine.questions(course, node)))
       return
     }
     if (req.method === 'GET' && route === '/file') {
@@ -293,15 +348,39 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
     if (req.method === 'GET' && route === '/graph') {
       const course = url.searchParams.get('course') ?? undefined
       const elementsOnly = url.searchParams.get('elements') === '1'
-      sendJson(res, 200, await run('api/graph', async () => JSON.stringify(await engine.graphAnalyze(course, elementsOnly))))
+      sendJson(res, 200, await apiRun('api/graph', () => engine.graphAnalyze(course, elementsOnly)))
       return
     }
     if (req.method === 'GET' && route === '/proposals') {
-      sendJson(res, 200, await run('api/proposals', async () => JSON.stringify(await engine.graphProposals())))
+      sendJson(res, 200, await apiRun('api/proposals', () => engine.graphProposals()))
       return
     }
     if (req.method === 'GET' && route === '/doctor') {
-      sendJson(res, 200, await run('api/doctor', async () => JSON.stringify(await engine.doctor())))
+      sendJson(res, 200, await apiRun('api/doctor', () => engine.doctor()))
+      return
+    }
+    if (req.method === 'GET' && route === '/checkins/today') {
+      sendJson(res, 200, await apiRun('api/checkins/today', () => engine.checkinToday()))
+      return
+    }
+    if (req.method === 'GET' && route === '/stats/calendar') {
+      const year = Number(url.searchParams.get('year')) || new Date().getFullYear()
+      const monthRaw = url.searchParams.get('month')
+      const month = monthRaw && Number.isFinite(Number(monthRaw)) ? Number(monthRaw) : undefined
+      sendJson(res, 200, await apiRun('api/stats/calendar', () => engine.calendarStats(year, month)))
+      return
+    }
+    if (req.method === 'GET' && route === '/tags') {
+      sendJson(res, 200, await apiRun('api/tags', () => engine.listTags()))
+      return
+    }
+    if (req.method === 'GET' && route === '/questions-all') {
+      const course = url.searchParams.get('course') ?? undefined
+      sendJson(res, 200, await apiRun('api/questions-all', () => engine.questionsAll(course)))
+      return
+    }
+    if (req.method === 'GET' && route === '/generate/status') {
+      sendJson(res, 200, await apiRun('api/generate/status', () => generationStatus()))
       return
     }
     if (req.method === 'POST') {
@@ -382,6 +461,47 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
           prompt => llmComplete(ctx, prompt),
           need(body, 'course'), need(body, 'node'), need(body, 'qid'),
           typeof body.answer === 'string' ? body.answer : ''))
+        return
+      }
+      if (route === '/question-add') {
+        const q = body.question
+        if (typeof q !== 'object' || q === null) throw new Error('missing required field: question')
+        sendJson(res, 200, await engine.questionAdd(
+          need(body, 'course'), need(body, 'node'), q as Record<string, unknown>))
+        return
+      }
+      if (route === '/question-archive') {
+        sendJson(res, 200, await engine.questionArchive(
+          need(body, 'course'), need(body, 'node'), need(body, 'qid'),
+          body.archived === true))
+        return
+      }
+      if (route === '/course/delete') {
+        sendJson(res, 200, await engine.courseDelete(need(body, 'course')))
+        return
+      }
+      if (route === '/generate/cancel') {
+        sendJson(res, 200, cancelGeneration(need(body, 'course'), need(body, 'node')))
+        return
+      }
+    }
+    if (req.method === 'PUT') {
+      const body = await readJson(req)
+      if (route === '/course/tags') {
+        const tags = Array.isArray(body.tags) ? body.tags.map(String) : []
+        sendJson(res, 200, await apiRun('api/course/tags', () => engine.setCourseTags(need(body, 'course'), tags)))
+        return
+      }
+      if (route === '/question/tags') {
+        const tags = Array.isArray(body.tags) ? body.tags.map(String) : []
+        sendJson(res, 200, await apiRun('api/question/tags', () =>
+          engine.setQuestionTags(need(body, 'course'), need(body, 'node'), need(body, 'qid'), tags)))
+        return
+      }
+      if (route === '/question-update') {
+        const patch = typeof body.patch === 'object' && body.patch !== null
+          ? body.patch as Record<string, unknown> : {}
+        sendJson(res, 200, await engine.questionUpdate(need(body, 'course'), need(body, 'node'), need(body, 'qid'), patch))
         return
       }
     }
@@ -593,24 +713,47 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     'learnhub: client panel API routes',
   )
 
-  // —— 独立面板页面（仪表盘 + 做题面板，移植 OB 双视图）——
+  // —— 独立面板页面（Vite SPA：web/dist/index.html + assets/*，子路径全部伺服）——
   ctx.effect(
     () => ctx.webServer.register({
-      kind: 'exact',
+      kind: 'prefix',
       path: PAGE,
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
         try {
-          const html = await readFile(PAGE_FILE, 'utf8')
-          // no-store：面板页每次现读伺服，禁止浏览器缓存旧 HTML（否则改 UI 需手动强刷）
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(html)
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          // 无尾斜杠的 /learnhub 会把 base './' 的资产解析到根路径（/assets/* 404）→ 统一重定向
+          if (url.pathname === PAGE) {
+            res.writeHead(301, { location: `${PAGE}/` })
+            res.end()
+            return
+          }
+          const rel = decodeURIComponent(url.pathname.slice(PAGE.length).replace(/^\/+/, '')) || 'index.html'
+          // 子路径限制在 dist 目录内（防 ../ 逃逸）；命中失败回落 index.html（SPA 语义）
+          let file = resolvePath(PAGE_DIST, rel)
+          if (!(file + sep).startsWith(PAGE_DIST)) file = join(PAGE_DIST, 'index.html')
+          let data: Buffer
+          try {
+            data = await readFile(file)
+          } catch {
+            file = join(PAGE_DIST, 'index.html')
+            data = await readFile(file)
+          }
+          const ext = file.slice(file.lastIndexOf('.')).toLowerCase()
+          const mime = ASSET_MIME[ext] ?? 'application/octet-stream'
+          // assets 带 hash 可永久缓存；index.html no-store 保证发布后刷新即生效
+          const immutable = rel.startsWith('assets/')
+          res.writeHead(200, {
+            'content-type': mime,
+            'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-store',
+          })
+          res.end(data)
         } catch (err) {
           res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
-          res.end(`learnhub page missing: ${err instanceof Error ? err.message : String(err)}`)
+          res.end(`learnhub panel missing (build ui/ first: npm run build): ${err instanceof Error ? err.message : String(err)}`)
         }
       },
     }),
-    'learnhub: dashboard + practice page',
+    'learnhub: panel SPA (web/dist)',
   )
 
   console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 21 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`)
