@@ -233,6 +233,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
   const [session, setSession] = useState<RecEvent[] | null>(null)
   const [tagFor, setTagFor] = useState<string | null>(null)
   const [createVisible, setCreateVisible] = useState(false)
+  const [runningJobs, setRunningJobs] = useState(0)
 
   const load = useCallback(async () => {
     const [c, r, t] = await Promise.all([
@@ -246,6 +247,20 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
   }, [])
 
   useEffect(() => { void load() }, [load])
+  // 后台生成悬浮指示条（allo CourseGenerationPill 同语义）：有 running 任务时出现
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const jobs = await api.generateStatus()
+        setRunningJobs(jobs.filter(j => j.status === 'running' || j.status === 'cancelling').length)
+      } catch {
+        setRunningJobs(0)
+      }
+    }
+    void poll()
+    const timer = setInterval(() => void poll(), 5000)
+    return () => clearInterval(timer)
+  }, [])
   useEffect(() => {
     const h = () => { void frame.reload(); void load() }
     window.addEventListener('learnhub:reload', h)
@@ -334,7 +349,25 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
         <TagEditor course={tagFor} initial={[]} allTags={allTags} onClose={() => setTagFor(null)}
           onSaved={async () => { await Promise.all([frame.reload(), load()]) }} />
       )}
-      <CreateDialog visible={createVisible} onClose={() => setCreateVisible(false)} />
+      {createVisible && <CreateDialog visible={createVisible} onClose={() => setCreateVisible(false)} />}
+
+      {/* 后台生成悬浮指示条（allo CourseGenerationPill 同语义） */}
+      {runningJobs > 0 && (
+        <div
+          role='button' tabIndex={0}
+          onClick={() => frame.goto('generate')}
+          onKeyDown={e => { if (e.key === 'Enter') frame.goto('generate') }}
+          style={{
+            position: 'fixed', right: 20, bottom: 20, zIndex: 100, cursor: 'pointer',
+            background: 'var(--color-bg-2,#fff)', border: '1px solid var(--color-border-2,#e5e6eb)',
+            borderRadius: 20, boxShadow: 'var(--color-shadow-1, 0 4px 10px rgba(0,0,0,0.1))',
+            padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+          <span className='arco-icon-loading' style={{ color: 'var(--color-primary-6,#165dff)' }}>◌</span>
+          <Text>{runningJobs} 个正文生成中</Text>
+          <Text type='secondary' style={{ fontSize: 12 }}>点击查看</Text>
+        </div>
+      )}
     </Space>
   )
 }

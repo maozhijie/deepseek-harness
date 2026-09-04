@@ -103,7 +103,7 @@ function TabBody({ tab, frame }: { tab: TabKey; frame: AppFrame }) {
     case 'graph': return <GraphPage frame={frame} />
     case 'bank': return <BankPage frame={frame} />
     case 'stats': return <StatsPage frame={frame} />
-    case 'generate': return <GeneratePage />
+    case 'generate': return <GeneratePage frame={frame} />
     case 'proposals': return <ProposalsPage />
     default: return null
   }

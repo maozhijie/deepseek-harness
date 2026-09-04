@@ -117,7 +117,7 @@ export interface CalendarDoc {
   days: Array<{ date: string; journal: number; practice: number; total: number }>
 }
 
-export interface QueueItem { course: string; node: string; reason?: string }
+export interface QueueItem { course: string; node: string; kind: string; reason: string; priority: string }
 export interface DoctorDoc { problems: Array<{ level: string; message: string }> }
 
 /** 作答判卷结果（question-answer / exercises 判卷共用）。 */

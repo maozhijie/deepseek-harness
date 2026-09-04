@@ -43,6 +43,7 @@ export const api = {
   coursesTree: () => http<import('./types').TreeDoc>('GET', '/courses/tree'),
   graph: (course?: string) => http<import('./types').GraphDoc>('GET', `/graph${q({ course })}`),
   recommend: (limit = 8) => http<import('./types').RecommendDoc>('GET', `/recommend?limit=${limit}`),
+  queue: () => http<import('./types').QueueItem[]>('GET', '/queue'),
   lesson: (node: string, course?: string) =>
     http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: Array<{ title: string; md: string }>; exercises: unknown[]; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
   questions: (course: string, node: string) =>
