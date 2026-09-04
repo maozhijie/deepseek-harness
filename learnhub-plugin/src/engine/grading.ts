@@ -68,8 +68,12 @@ export function choiceAnswerOk(user: string, expected: string): boolean {
 
 // ---------------------------------------------------------------- allo 判卷（evaluate 语义）
 
-/** 新题库题型（P4 题库 schema）。 */
-export type AlloKind = 'single_choice' | 'true_false' | 'fill_in_blank' | 'reflection'
+/** 新题库题型（P4 题库 schema）。
+ * 规则判卷：single_choice / true_false / fill_in_blank / multi_choice / numeric / ordering / matching；
+ * AI 判卷：reflection（0–1 评分要点）与 open_question（0–10 综合应用批改）。 */
+export type AlloKind =
+  | 'single_choice' | 'true_false' | 'fill_in_blank' | 'reflection'
+  | 'multi_choice' | 'numeric' | 'ordering' | 'matching' | 'open_question'
 
 export interface AlloQuestion {
   kind: AlloKind
@@ -77,6 +81,8 @@ export interface AlloQuestion {
   answer: string | boolean | string[]
   options?: string[]
   explanation?: string
+  /** numeric 题的容差（差值 ≤ tol 判对；缺省 0）。 */
+  tol?: number
 }
 
 export const PASS_SCORE = 0.6
@@ -103,6 +109,47 @@ export function evaluateAllo(q: AlloQuestion, response: unknown): { score: numbe
       const s = typeof response === 'string' ? response.trim() : ''
       if (!s) throw new Error('reflection 作答不能为空')
       // 到达这里说明 AI 判卷已失败或未启用：降级「非空即对」（allo 同语义）
+      correct = true
+      break
+    }
+    case 'multi_choice': {
+      const s = typeof response === 'string' ? response : ''
+      if (!normAnswer(s)) throw new Error('multi_choice 作答不能为空')
+      const picked = new Set(s.split(/[,，]/).map(normChoice).filter(Boolean))
+      const expected = new Set((Array.isArray(q.answer) ? q.answer : []).map(normChoice))
+      correct = picked.size === expected.size && [...picked].every(x => expected.has(x))
+      break
+    }
+    case 'numeric': {
+      const s = typeof response === 'string' ? response.trim() : ''
+      if (!s) throw new Error('numeric 作答不能为空')
+      const nu = numericOf(s)
+      const ne = numericOf(String(q.answer))
+      correct = nu !== null && ne !== null && Math.abs(nu - ne) <= (q.tol ?? 0)
+      break
+    }
+    case 'ordering': {
+      const s = typeof response === 'string' ? response.trim() : ''
+      if (!s) throw new Error('ordering 作答不能为空')
+      // 提交 = 排序后的项文本按换行拼接；answer = 正确顺序的项文本数组
+      const seq = s.split(/\n/).map(normAnswer).filter(Boolean)
+      const expected = (Array.isArray(q.answer) ? q.answer : []).map(normAnswer)
+      correct = seq.length === expected.length && seq.every((x, i) => x === expected[i])
+      break
+    }
+    case 'matching': {
+      const s = typeof response === 'string' ? response.trim() : ''
+      if (!s) throw new Error('matching 作答不能为空')
+      // 提交 = 与 options 左列一一对应的右项文本按换行拼接；answer = 正确配对文本数组
+      const seq = s.split(/\n/).map(normAnswer)
+      const expected = (Array.isArray(q.answer) ? q.answer : []).map(normAnswer)
+      correct = seq.length === expected.length && seq.every((x, i) => x === expected[i])
+      break
+    }
+    case 'open_question': {
+      const s = typeof response === 'string' ? response.trim() : ''
+      if (!s) throw new Error('open_question 作答不能为空')
+      // AI 判卷失败的降级：非空记 0.5（见 questionAnswer），此处仅类型完备兜底
       correct = true
       break
     }
@@ -147,6 +194,36 @@ export function parseReflectionGrading(raw: string): { score: number; feedback: 
     throw new Error('reflection grading reply missing score/feedback')
   }
   return { score: Math.min(1, Math.max(0, doc.score)), feedback: doc.feedback }
+}
+
+/** 开放题 AI 判卷系统提示词：0–10 分制，≥6 及格；批改 + 改进建议两段缺一不可。 */
+export const OPEN_QUESTION_GRADING_SYSTEM = `You are a strict but constructive examiner grading a learner's open-ended answer that applies an entire lesson's content.
+
+Score the answer from 0 to 10 (6 is passing):
+- Coverage: does it apply the lesson's core concepts across sections?
+- Correctness: are the applied concepts used accurately?
+- Depth: does it show integrated understanding rather than surface recall?
+
+Reply with ONLY one JSON object matching this shape:
+{
+  "score": 7,
+  "feedback": "markdown text"
+}
+Rules:
+- score must be an integer between 0 and 10.
+- feedback must be Markdown with two mandatory parts: (1) 逐点批改 — go through the learner's answer point by point, marking what is right and what is wrong or missing; (2) 改进建议 — concrete, actionable suggestions to reach full marks.
+- Write the feedback in the same language as the learner's answer.
+- Output JSON only, without Markdown fences or commentary.`
+
+/** 从模型回复中提取开放题 {score 0-10, feedback}：容错同 reflection。 */
+export function parseOpenGrading(raw: string): { score: number; feedback: string } {
+  const m = raw.match(/\{[\s\S]*\}/)
+  if (!m) throw new Error('unparseable open-question grading reply')
+  const doc = JSON.parse(m[0].replace(/,\s*([}\]])/g, '$1')) as { score?: unknown; feedback?: unknown }
+  if (typeof doc.score !== 'number' || typeof doc.feedback !== 'string') {
+    throw new Error('open-question grading reply missing score/feedback')
+  }
+  return { score: Math.min(10, Math.max(0, Math.round(doc.score))), feedback: doc.feedback }
 }
 
 // ---------------------------------------------------------------- 作答记录与 EMA

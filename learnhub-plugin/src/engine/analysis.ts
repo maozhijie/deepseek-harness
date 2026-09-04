@@ -23,7 +23,7 @@ export interface GraphAnalysis {
   unreachable: string[]
   bottlenecks: Array<{ node: string; successors: number; unlocks: number }>
   lapse_hotspots: Array<{ node: string; lapses: number }>
-  nodes: Array<{ data: { id: string; region: string; block: string; depth: number; stage: string; opt: boolean } }>
+  nodes: Array<{ data: { id: string; region: string; block: string; depth: number; stage: string; opt: boolean; mastery: number; type?: string } }>
   edges: Array<{ data: { id: string; source: string; target: string; kind: string; w?: number } }>
 }
 
@@ -68,16 +68,22 @@ export async function analyzeGraph(
     .slice(0, 10)
 
   // cytoscape 元素：渲染用边 = 传递约简后的 pre 边 + enc 成分技能边（kind 区分）
-  const nodes = graph.names.map(n => ({
-    data: {
-      id: n,
-      region: graph.blockOf[n][1],
-      block: graph.blockOf[n][2],
-      depth: graph.depth[n] ?? 0,
-      stage: effectiveStage(state, n),
-      opt: graph.opt.has(n),
-    },
-  }))
+  // 节点掌握度 = frontmatter 完成快照与最近作答 EMA 的较大者（作答即更新，图上深浅实时反映）
+  const nodes = graph.names.map(n => {
+    const fm = state[n]
+    return {
+      data: {
+        id: n,
+        region: graph.blockOf[n][1],
+        block: graph.blockOf[n][2],
+        depth: graph.depth[n] ?? 0,
+        stage: effectiveStage(state, n),
+        opt: graph.opt.has(n),
+        mastery: Math.max(fm?.mastery ?? 0, fm?.practice_ema ?? 0),
+        ...(graph.typeOf[n] ? { type: graph.typeOf[n] } : {}),
+      },
+    }
+  })
   const edges = [
     ...graph.edges.map(([u, v]) => ({ data: { id: `${u}->${v}`, source: u, target: v, kind: 'pre' } })),
     ...Object.entries(graph.encOf).flatMap(([u, list]) =>

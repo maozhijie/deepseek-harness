@@ -9,15 +9,17 @@ const { Text } = Typography
 
 const KIND_LABEL: Record<string, string> = {
   single_choice: '单选', multi_choice: '多选', fill_in_blank: '填空', true_false: '判断',
+  numeric: '数值', ordering: '排序', matching: '配对', reflection: '反思', open_question: '开放',
 }
 
-/** 自建题表单（四题型动态字段）。 */
+/** 自建题表单（九题型动态字段）。 */
 function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: () => void }) {
   const [node, setNode] = useState(props.nodes[0] ?? '')
   const [kind, setKind] = useState('true_false')
   const [q, setQ] = useState('')
   const [options, setOptions] = useState('')
   const [answer, setAnswer] = useState('')
+  const [tol, setTol] = useState('')
   const [explanation, setExplanation] = useState('')
   const [difficulty, setDifficulty] = useState(1)
   const [busy, setBusy] = useState(false)
@@ -27,11 +29,18 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
     setBusy(true)
     try {
       const question: Record<string, unknown> = { kind, q: q.trim(), difficulty, explanation: explanation.trim() || undefined }
+      const optList = options.split('\n').map(s => s.trim()).filter(Boolean)
       if (kind === 'true_false') question.answer = answer.trim() === 'true'
-      else if (kind === 'fill_in_blank') question.answer = answer.split('|').map(s => s.trim()).filter(Boolean)
-      else {
+      else if (kind === 'fill_in_blank' || kind === 'multi_choice' || kind === 'ordering' || kind === 'matching') {
+        question.answer = answer.split('|').map(s => s.trim()).filter(Boolean)
+        if (kind !== 'fill_in_blank') question.options = optList
+      } else if (kind === 'numeric') {
         question.answer = answer.trim()
-        question.options = options.split('\n').map(s => s.trim()).filter(Boolean)
+        const t = Number(tol)
+        if (Number.isFinite(t) && t > 0) question.tol = t
+      } else {
+        question.answer = answer.trim()
+        if (kind === 'single_choice') question.options = optList
       }
       const r = await api.questionAdd(props.course, node, question)
       Message.success(`已添加 ${r.id}（题库共 ${r.count} 题）`)
@@ -43,6 +52,17 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
     }
   }
 
+  const needsOptions = kind === 'single_choice' || kind === 'multi_choice' || kind === 'ordering' || kind === 'matching'
+  const answerPlaceholder = kind === 'true_false' ? '答案：true / false'
+    : kind === 'fill_in_blank' ? '可接受答案，用 | 分隔多个'
+      : kind === 'multi_choice' ? '正确选项字母，用 | 分隔（如 A|C）'
+        : kind === 'ordering' ? '正确顺序的项文本，用 | 分隔（与选项同一组项）'
+          : kind === 'matching' ? '右列配对文本，用 | 分隔（顺序对应左列每一行）'
+            : kind === 'numeric' ? '数值答案（支持小数/分数/百分数）'
+              : kind === 'reflection' ? '评分要点'
+                : kind === 'open_question' ? '参考要点（可留空，AI 按题干综合评判）'
+                  : '正确答案（选项字母）'
+
   return (
     <Space direction='vertical' style={{ width: '100%' }} size={10}>
       <Select value={node} onChange={setNode} placeholder='选择节点' style={{ width: '100%' }}>
@@ -52,15 +72,17 @@ function CreateQuestionForm(props: { course: string; nodes: string[]; onDone: ()
         {Object.entries(KIND_LABEL).map(([k, v]) => <Select.Option key={k} value={k}>{v}</Select.Option>)}
       </Select>
       <Input.TextArea value={q} onChange={setQ} placeholder='题干（支持 LaTeX 文本）' autoSize={{ minRows: 2, maxRows: 6 }} />
-      {(kind === 'single_choice' || kind === 'multi_choice') && (
-        <Input.TextArea value={options} onChange={setOptions} placeholder='选项，每行一个（A/B/C 自动编号）'
+      {needsOptions && (
+        <Input.TextArea value={options} onChange={setOptions}
+          placeholder={kind === 'ordering' ? '乱序项，每行一个（answer 按正确顺序）'
+            : kind === 'matching' ? '左列项，每行一个（answer 顺序与之对应）'
+              : '选项，每行一个（A/B/C 自动编号）'}
           autoSize={{ minRows: 3, maxRows: 8 }} />
       )}
-      <Input
-        value={answer} onChange={setAnswer}
-        placeholder={kind === 'true_false' ? '答案：true / false'
-          : kind === 'fill_in_blank' ? '可接受答案，用 | 分隔多个'
-            : '正确答案（选项字母，多选用 | 分隔）'} />
+      <Input value={answer} onChange={setAnswer} placeholder={answerPlaceholder} />
+      {kind === 'numeric' && (
+        <Input value={tol} onChange={setTol} placeholder='容差 tol（可选，如 0.01）' />
+      )}
       <Input value={explanation} onChange={setExplanation} placeholder='解析（可选）' />
       <Space size={10}>
         <Text>难度</Text>
@@ -186,9 +208,11 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
       const patch: Record<string, unknown> = { q: q.trim(), difficulty }
       if (explanation.trim()) patch.explanation = explanation.trim()
       if (answer.trim()) {
-        if (props.entry.kind === 'true_false') patch.answer = answer.trim() === 'true'
-        else if (props.entry.kind === 'fill_in_blank') patch.answer = answer.split('|').map(s => s.trim()).filter(Boolean)
-        else patch.answer = answer.trim()
+        const k = props.entry.kind
+        if (k === 'true_false') patch.answer = answer.trim() === 'true'
+        else if (k === 'fill_in_blank' || k === 'multi_choice' || k === 'ordering' || k === 'matching') {
+          patch.answer = answer.split('|').map(s => s.trim()).filter(Boolean)
+        } else patch.answer = answer.trim()
       }
       await api.questionUpdate(props.entry.course, props.entry.node, props.entry.qid, patch)
       Message.success('已保存（validateBank 门禁通过）')
@@ -206,11 +230,19 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
       {props.entry && (
         <Space direction='vertical' style={{ width: '100%' }} size={10}>
           <Text type='secondary'>
-            {props.entry.kind === 'true_false' ? '答案 true/false' : '答案请与选项字母/可接受值一致（门禁会校验）'}
+            {props.entry.kind === 'true_false' ? '答案 true/false'
+              : props.entry.kind === 'numeric' ? '数值答案（tol 保留原值）'
+                : props.entry.kind === 'ordering' ? '正确顺序项，用 | 分隔'
+                  : props.entry.kind === 'matching' ? '右列配对文本，用 | 分隔（对应左列顺序）'
+                    : props.entry.kind === 'open_question' ? '参考要点（可留空不改）'
+                      : '答案请与选项字母/可接受值一致（门禁会校验）'}
           </Text>
           {props.entry.options && (
             <Space size={4} wrap>{props.entry.options.map((o, i) => (
-              <Tag key={i} size='small'>{String.fromCharCode(65 + i)}. {o}</Tag>
+              <Tag key={i} size='small'>
+                {props.entry.kind === 'single_choice' || props.entry.kind === 'multi_choice'
+                  ? `${String.fromCharCode(65 + i)}. ${o}` : o}
+              </Tag>
             ))}</Space>
           )}
           <Input.TextArea value={q} onChange={setQ} autoSize={{ minRows: 2, maxRows: 6 }} />

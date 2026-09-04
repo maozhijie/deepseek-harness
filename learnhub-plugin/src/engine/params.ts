@@ -14,3 +14,15 @@ export const RECOVERY_CLEAR_RATIO = 0.7  // 恢复模式清偿率达该值后恢
 export const QUIZ_ITEMS_PER_CANDIDATE = 2 // 前置抽测每候选最多题数
 export const SCAN_INIT_S = 7.0           // scan 粗估初始稳定性（天）
 export const SCAN_INIT_D = 5.0           // scan 粗估初始难度
+export const FSRS_DIFFICULTY_MID = 5.0   // FSRS difficulty 的中性值（k 校准：difficulty/该值 = 难度因子）
+
+// ---- XP 时间账本（1 XP ≈ 1 分钟有效专注；ETA = 剩余估算 XP ÷ 每日目标）----
+export const XP_BASE: Record<string, number> = {
+  single_choice: 1, true_false: 1, fill_in_blank: 2, reflection: 3,
+  multi_choice: 1, numeric: 2, ordering: 2, matching: 2, open_question: 3,
+}
+export const XP_GUESS_SECONDS = 5        // 作答耗时低于该值且答错 → 乱猜
+export const XP_GUESS_PENALTY = -1       // 乱猜负 XP（保持时间账本诚实）
+export const XP_PERFECT_BONUS = 2        // 节点满分完成的 bonus XP
+export const XP_PER_NODE_DEFAULT = 12    // 无课程历史时每节点 XP 估算
+export const DAILY_XP_GOAL_DEFAULT = 30  // 每日 XP 目标缺省（state/learnhub.json 可覆盖）

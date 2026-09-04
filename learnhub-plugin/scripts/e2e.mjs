@@ -190,6 +190,31 @@ async function run() {
     await engine.questionArchive(courseName, noteName, 'q3', true)
     const vis = await engine.questions(courseName, noteName)
     assert(vis.questions.every(q => q.id !== 'q3'), 'archived question still visible')
+  })
+  await step('XP 预算对账（净账 = N₀×k，settle 恰一次）', async () => {
+    const journal = readFileSync(join(dstCenter, 'state', 'journal.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map(l => JSON.parse(l))
+    const settles = journal.filter(r => r.kind === 'xp_settle' && r.node === noteName)
+    assert(settles.length === 1, `settle rows=${settles.length}`)
+    const practice = readFileSync(join(dstCenter, 'state', 'practice.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map(l => JSON.parse(l))
+    const earned = practice.filter(r => r.node === noteName).reduce((s, r) => s + (r.xp ?? 0), 0)
+      + journal.filter(r => r.node === noteName).reduce((s, r) => s + (r.xp ?? 0), 0)
+    const bank = await engine.bank.load(engine.paths.courseRoot(courseRoot), noteName)
+    // 与 engine 同公式重算预算：无 est → N₀ = Σ(权重×难度)；k = FSRS difficulty 加权
+    const W = { single_choice: 1, true_false: 1, fill_in_blank: 2, multi_choice: 1, numeric: 2, ordering: 2, matching: 2, reflection: 3, open_question: 3 }
+    const qs = bank.questions.filter(q => !q.archived)
+    let weights = 0
+    let weighted = 0
+    for (const q of qs) {
+      const w = (W[q.kind] ?? 1) * Math.max(1, q.difficulty ?? 1)
+      weights += w
+      weighted += w * (q.fsrs?.difficulty ? q.fsrs.difficulty / 5 : 1)
+    }
+    const k = Math.min(3, Math.max(0.5, weighted / weights))
+    const budget = Math.round(3 * k) // active = q1(1×1) + q2(2×1) = 3（q3 已归档；settle 时 q3 尚未创建，两时刻题集相同）
+    assert(earned === budget, `net xp ${earned} != budget ${budget} (k=${k.toFixed(3)})`)
+    // 难度修订放在对账之后：完成时定价已锁定，事后改难度不得动摇已结算账目
     await engine.questionUpdate(courseName, noteName, 'q2', { difficulty: 3 })
   })
   await step('graph edit propose→apply（rename 联动：笔记改名+题库随迁）', async () => {
@@ -205,6 +230,133 @@ async function run() {
     assert(state[`${noteName}B`] && !state[noteName], 'note not relinked (frontmatter scan)')
     assert(existsSync(join(dstCenter, courseRoot, '题库', `${noteName}B.yaml`)), 'bank not migrated')
     assert(!existsSync(join(dstCenter, courseRoot, '题库', `${noteName}.yaml`)), 'old bank file still there')
+  })
+  await step('questionSave 5 种新题型（multi/numeric/ordering/matching/open）', async () => {
+    const r = await engine.questionSave(courseName, `${noteName}B`, [
+      'node: ' + `${noteName}B`,
+      'questions:',
+      '  - id: m1',
+      '    kind: multi_choice',
+      '    q: 以下哪些是自然数？',
+      '    options: ["A. -1","B. 0","C. 3"]',
+      '    answer: ["B","C"]',
+      '    explanation: 0 与正整数都是自然数。',
+      '  - id: n1',
+      '    kind: numeric',
+      '    q: 圆周率保留两位小数约为____。',
+      '    answer: 3.14',
+      '    tol: 0.05',
+      '    explanation: π ≈ 3.14159。',
+      '  - id: o1',
+      '    kind: ordering',
+      '    q: 按从小到大排序。',
+      '    options: ["三","一","二"]',
+      '    answer: ["一","二","三"]',
+      '    explanation: 汉字数字顺序。',
+      '  - id: p1',
+      '    kind: matching',
+      '    q: 国家与首都配对。',
+      '    options: ["中国","法国"]',
+      '    answer: ["北京","巴黎"]',
+      '    explanation: 常识配对。',
+      '  - id: w1',
+      '    kind: open_question',
+      '    q: 用自己的话说明自然数与整数的联系。',
+      '    answer: 自然数是非负整数；整数在其基础上加入负数。',
+      '    explanation: 综合应用题，AI 按 10 分制批改。',
+    ].join('\n'))
+    assert(r.count === 5, `count=${r.count}`)
+  })
+  await step('questions(list)：matching 暴露 pairOptions、answer 不泄漏', async () => {
+    const r = await engine.questions(courseName, `${noteName}B`)
+    assert(r.questions.length === 5, `len=${r.questions.length}`)
+    const p1 = r.questions.find(q => q.id === 'p1')
+    assert(Array.isArray(p1?.pairOptions) && p1.pairOptions.length === 2, 'matching pairOptions missing')
+    assert(!('answer' in p1), 'matching answer leaked')
+    const w1 = r.questions.find(q => q.id === 'w1')
+    assert(w1?.kind === 'open_question', 'open_question kind missing')
+  })
+  await step('multi_choice 判卷（集合相等，顺序无关）', async () => {
+    const noLlm = async () => { throw new Error('no llm') }
+    const ok = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'm1', 'C,B')
+    assert(ok.correct === true && ok.score === 100, `expected correct, got ${JSON.stringify(ok)}`)
+    const bad = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'm1', 'A', 60)
+    assert(bad.correct === false && bad.answer === 'BC', `expected wrong + reveal BC, got ${JSON.stringify(bad)}`)
+  })
+  await step('numeric 判卷（tol 容差）', async () => {
+    const noLlm = async () => { throw new Error('no llm') }
+    const ok = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'n1', '3.13')
+    assert(ok.correct === true, `tol 0.05 should accept 3.13: ${JSON.stringify(ok)}`)
+    const bad = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'n1', '0.5', 60)
+    assert(bad.correct === false, '0.5 should be wrong')
+  })
+  await step('ordering 判卷（顺序敏感）', async () => {
+    const noLlm = async () => { throw new Error('no llm') }
+    const ok = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'o1', '一\n二\n三')
+    assert(ok.correct === true, `expected correct: ${JSON.stringify(ok)}`)
+    const bad = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'o1', '一\n三\n二', 60)
+    assert(bad.correct === false, 'wrong order should fail')
+    assert(bad.answer.includes('一 → 二 → 三'), `reveal chain: ${bad.answer}`)
+  })
+  await step('matching 判卷（逐位配对）', async () => {
+    const noLlm = async () => { throw new Error('no llm') }
+    const ok = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'p1', '北京\n巴黎')
+    assert(ok.correct === true, `expected correct: ${JSON.stringify(ok)}`)
+    const bad = await engine.questionAnswer(noLlm, courseName, `${noteName}B`, 'p1', '巴黎\n北京', 60)
+    assert(bad.correct === false, 'mismatch should fail')
+    assert(bad.answer.includes('中国 → 北京'), `reveal pairs: ${bad.answer}`)
+  })
+  await step('open_question AI 判卷（10 分制，≥6 及格）', async () => {
+    const ok = await engine.questionAnswer(
+      async () => JSON.stringify({ score: 7, feedback: '要点覆盖良好，建议补充负数例子。' }),
+      courseName, `${noteName}B`, 'w1', '自然数就是非负的整数。')
+    assert(ok.correct === true && ok.score === 70, `expected 70/correct, got ${JSON.stringify(ok)}`)
+    assert(String(ok.feedback).includes('建议'), 'feedback missing')
+    const bad = await engine.questionAnswer(
+      async () => JSON.stringify({ score: 3, feedback: '只说对了一半，请对照参考要点重写。' }),
+      courseName, `${noteName}B`, 'w1', '不知道。', 60)
+    assert(bad.correct === false && bad.score === 30, `expected 30/wrong, got ${JSON.stringify(bad)}`)
+  })
+  await step('乱猜（耗时<5s 且答错）：负 XP + 不推进 FSRS（含首答）', async () => {
+    // m1 已答对过一次，此处乱猜触发「guess 优先于 repeat」分支：负分照记
+    const r = await engine.questionAnswer(async () => { throw new Error('no llm') }, courseName, `${noteName}B`, 'm1', 'A', 1)
+    assert(r.correct === false && r.xp === -1 && r.xp_reason === 'guess', `expected guess penalty, got ${JSON.stringify(r)}`)
+    assert(r.scheduled === false, `scheduled=${r.scheduled}`)
+    const bank = await engine.bank.load(engine.paths.courseRoot(courseRoot), `${noteName}B`)
+    const m1 = bank.questions.find(q => q.id === 'm1')
+    assert(m1.fsrs?.reps === 1, `reps=${m1.fsrs?.reps}（乱猜不应推进调度卡）`)
+    assert(m1.stats?.attempts === 3, `attempts=${m1.stats?.attempts}`)
+  })
+  await step('interactive 交互件：标记块拆分落盘 + 引用替换 + 质检门', async () => {
+    const html = '<!doctype html><html><body><canvas id="c"></canvas><script>postMessage({type:"LEARNHUB_COMPLETE"},"*")</script></body></html>'
+    const body = ['# 交互正文', '', '```learnhub-interactive:交互/演示.html', html, '```', '', '完。'].join('\n')
+    const r = await engine.contentApply(courseName, `${noteName}B`, body)
+    assert(r.version > 0, `version=${r.version}`)
+    const htmlPath = join(dstCenter, courseRoot, '交互', '演示.html')
+    assert(existsSync(htmlPath), 'interactive html not written')
+    assert(readFileSync(htmlPath, 'utf8').includes('LEARNHUB_COMPLETE'), 'html content mismatch')
+    const check = await engine.contentCheck(courseName, `${noteName}B`)
+    assert(check.passed, `gate should pass: ${check.findings.join('；')}`)
+    // 删除落盘文件 → 质检门必须拒绝悬空引用
+    rmSync(htmlPath)
+    const broken = await engine.contentCheck(courseName, `${noteName}B`)
+    assert(!broken.passed && broken.findings.some(f => f.includes('演示.html')), `gate should reject dangling interactive ref: ${JSON.stringify(broken)}`)
+  })
+  await step('风格变体：promptKinds + loadPrompt 落盘 + 未知类型 fail loud', async () => {
+    const kinds = await engine.promptKinds()
+    for (const k of ['课程生成', '课程生成-苏格拉底', '课程生成-费曼']) assert(kinds.includes(k), `missing prompt kind: ${k}`)
+    const p = await engine.loadPrompt('课程生成-苏格拉底')
+    assert(p.length > 100, 'socratic prompt too short')
+    assert(existsSync(join(dstCenter, 'state', '提示词', '课程生成-苏格拉底.md')), 'style prompt not persisted')
+    let threw = false
+    try { await engine.loadPrompt('课程生成-不存在') } catch { threw = true }
+    assert(threw, 'unknown style must fail loud')
+  })
+  await step('生成任务注册表落盘往返（durable genJobs）', async () => {
+    await engine.saveGenJobs([{ course: courseName, node: `${noteName}B`, kind: 'content', status: 'running', ts: new Date().toISOString() }])
+    const jobs = await engine.loadGenJobs()
+    assert(jobs.length === 1 && jobs[0].status === 'running', `roundtrip mismatch: ${JSON.stringify(jobs)}`)
+    assert(existsSync(join(dstCenter, 'state', '生成任务.json')), 'gen jobs file missing')
   })
   await step('courseDelete（移入 .trash）', async () => {
     const r = await engine.courseDelete(courseName)

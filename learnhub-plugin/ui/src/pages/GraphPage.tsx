@@ -13,6 +13,28 @@ const { Text } = Typography
 const REC_TYPE_COLOR: Record<string, string> = { review: 'green', overdue: 'red', ready: 'blue', new: 'cyan' }
 const REC_TYPE_LABEL: Record<string, string> = { review: '复习', overdue: '逾期', ready: '就绪', new: '新学' }
 
+/** 图例：状态色点 + 掌握度深浅说明。 */
+function Legend() {
+  const items: Array<[string, string]> = [
+    ['未学', '#c9cdd4'],
+    ['就绪/进行', '#165dff'],
+    ['复习/掌握', '#00b42a'],
+    ['已跳过', '#722ed1'],
+    ['推荐下一步', '#ff7d00'],
+  ]
+  return (
+    <Space size={12} wrap align='center' style={{ fontSize: 12 }}>
+      {items.map(([label, color]) => (
+        <Space key={label} size={4}>
+          <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
+          <Text type='secondary'>{label}</Text>
+        </Space>
+      ))}
+      <Text type='secondary'>同色底越深 = 掌握度越高（悬停看数值）</Text>
+    </Space>
+  )
+}
+
 export default function GraphPage({ frame }: { frame: AppFrame }) {
   const course = frame.course
   const [doc, setDoc] = useState<GraphDoc | null>(null)
@@ -158,6 +180,8 @@ export default function GraphPage({ frame }: { frame: AppFrame }) {
           key={course} doc={filtered} recommended={recommended} lockedIds={lockedIds}
           bankSet={bankSet} focusNode={frame.focusNode} onSelect={onSelect} />
       </div>
+
+      <Legend />
     </Space>
   )
 }

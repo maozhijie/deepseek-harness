@@ -14,7 +14,8 @@ import { safeFilename } from './paths.ts'
 import type { GBlock, GNode, GRegion, EncEdge } from './types.ts'
 import type { Paths } from './paths.ts'
 
-const NODE_KEYS = new Set(['name', 'pre', 'opt', 'note', 'enc'])
+const NODE_KEYS = new Set(['name', 'pre', 'opt', 'note', 'enc', 'est', 'type'])
+const NODE_TYPES = new Set(['practice'])
 
 export class SchemaError extends Error {}
 
@@ -53,7 +54,7 @@ function parseNode(raw: unknown, path: string, where: string): GNode {
   if (typeof raw !== 'object' || raw === null) fail(path, `${where} 节点必须是映射`)
   const r = raw as Record<string, unknown>
   const unknown = Object.keys(r).filter(k => !NODE_KEYS.has(k))
-  if (unknown.length) fail(path, `${where} 含未知字段 ${JSON.stringify(unknown)}（只允许 name/pre/opt/note/enc）`)
+  if (unknown.length) fail(path, `${where} 含未知字段 ${JSON.stringify(unknown)}（只允许 name/pre/opt/note/enc/est/type）`)
   const name = r.name
   if (typeof name !== 'string' || !name.trim()) fail(path, `${where} 节点 name 缺失或为空`)
   const pre = r.pre ?? []
@@ -63,7 +64,18 @@ function parseNode(raw: unknown, path: string, where: string): GNode {
   const note = r.note ?? ''
   if (typeof note !== 'string') fail(path, `${where}[${name}] note 必须是字符串`)
   const enc = parseEnc(r.enc ?? [], path, where, name)
-  return { name: name.trim(), pre: pre as string[], opt, note, enc }
+  const node: GNode = { name: name.trim(), pre: pre as string[], opt, note, enc }
+  if (r.est !== undefined) {
+    const est = Number(r.est)
+    if (!Number.isFinite(est) || est <= 0) fail(path, `${where}[${node.name}] est 必须是正数（分钟）`)
+    node.est = Math.round(est)
+  }
+  if (r.type !== undefined) {
+    const type = String(r.type)
+    if (!NODE_TYPES.has(type)) fail(path, `${where}[${node.name}] type 只允许 practice`)
+    node.type = type as GNode['type']
+  }
+  return node
 }
 
 /** 解析单个区 YAML 文件为 Region。 */
@@ -138,6 +150,8 @@ export class GraphStore {
           if (n.pre.length) doc.pre = [...n.pre]
           if (n.opt) doc.opt = true
           if (n.note) doc.note = n.note
+          if (n.est !== undefined) doc.est = n.est
+          if (n.type) doc.type = n.type
           if (n.enc.length) doc.enc = n.enc.map(e => {
             const edge: Record<string, unknown> = { node: e.node, w: e.w }
             if (e.note) edge.note = e.note
@@ -161,6 +175,10 @@ export class Graph {
   preOf: Record<string, string[]> = {}
   opt = new Set<string>()
   noteOf: Record<string, string> = {}
+  /** name → 标称学习时长（分钟；未标注的节点不在表内）。 */
+  estOf: Record<string, number> = {}
+  /** name → 节点类型（practice 交互实践；普通节点不在表内）。 */
+  typeOf: Record<string, 'practice'> = {}
   regionIdxOf: Record<string, number> = {}
   /** name → [区序号, 区名, 块名]。 */
   blockOf: Record<string, [number, string, string]> = {}
@@ -195,6 +213,8 @@ export class Graph {
           this.encOf[n] = node.enc.map(e => [e.node, e.w])
           if (node.opt) this.opt.add(n)
           if (node.note) this.noteOf[n] = node.note
+          if (node.est !== undefined) this.estOf[n] = node.est
+          if (node.type) this.typeOf[n] = node.type
         }
       }
     }

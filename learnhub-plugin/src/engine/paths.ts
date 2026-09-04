@@ -33,6 +33,8 @@ export class Paths {
   get recoveryStatePath(): string { return `${this.centerStateDir}/recovery_state.json` }
   get runLogPath(): string { return `${this.centerStateDir}/运行日志.md` }
   get promptDir(): string { return `${this.centerStateDir}/提示词` }
+  get learnhubConfigPath(): string { return `${this.centerStateDir}/learnhub.json` }
+  get genJobsPath(): string { return `${this.centerStateDir}/生成任务.json` }
   get trashDir(): string { return `${this.centerRoot}/.trash` }
 
   sessionPath(dateStr: string): string { return `${this.sessionDir}/${dateStr}.md` }

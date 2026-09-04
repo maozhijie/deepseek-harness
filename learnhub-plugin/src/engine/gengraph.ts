@@ -406,13 +406,19 @@ function parseProposalNode(raw: Record<string, unknown>): GNode {
         ? { node: e, w: 1.0 }
         : { node: String((e as Record<string, unknown>).node), w: Number((e as Record<string, unknown>).w ?? 1) })
     : []
-  return {
+  const node: GNode = {
     name: String(raw.name ?? '').trim(),
     pre: Array.isArray(raw.pre) ? raw.pre.map(String) : [],
     opt: Boolean(raw.opt),
     note: typeof raw.note === 'string' ? raw.note : '',
     enc,
   }
+  if (raw.est !== undefined) {
+    const est = Number(raw.est)
+    if (Number.isFinite(est) && est > 0) node.est = Math.round(est)
+  }
+  if (raw.type === 'practice') node.type = 'practice'
+  return node
 }
 
 /** 在 regions 副本上模拟全部操作 → 错误列表（gen._simulate_ops 同语义）。 */

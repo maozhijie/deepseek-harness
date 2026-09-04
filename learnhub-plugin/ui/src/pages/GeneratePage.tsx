@@ -1,8 +1,9 @@
 /** 生成页：待生成队列（生成队列.md 人审产物）+ 进行中/近期生成任务（服务端任务注册表）。
- * 页面刷新后状态从这里恢复（服务端注册表是事实来源，allo 同语义）。 */
-import { Button, Card, Empty, Message, Space, Table, Tag, Typography } from '@arco-design/web-react'
+ * 页面刷新后状态从这里恢复（服务端注册表是事实来源，allo 同语义）。
+ * 生成支持提示词风格变体（课程生成-<style>）；失败任务可一键转 dsh 会话讨论。 */
+import { Button, Card, Empty, Message, Select, Space, Table, Tag, Typography } from '@arco-design/web-react'
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, discussInHost } from '../api'
 import type { AppFrame } from '../App'
 import type { GenJobItem, QueueItem } from '../types'
 
@@ -20,6 +21,8 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
   const [jobs, setJobs] = useState<GenJobItem[] | null>(null)
   const [queue, setQueue] = useState<QueueItem[] | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [styles, setStyles] = useState<string[]>([])
+  const [style, setStyle] = useState<string | undefined>(undefined)
 
   const load = useCallback(async () => {
     try {
@@ -41,6 +44,15 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
     return () => clearInterval(timer)
   }, [load])
 
+  // 风格清单 = 「课程生成」前缀的提示词类型（默认/内置变体/自建）
+  useEffect(() => {
+    void api.prompts().then(kinds => {
+      setStyles(kinds
+        .filter(k => k === '课程生成' || k.startsWith('课程生成-'))
+        .map(k => (k === '课程生成' ? '' : k.slice('课程生成-'.length))))
+    }).catch(() => setStyles([]))
+  }, [])
+
   const cancel = async (j: GenJobItem) => {
     try {
       await api.generateCancel(j.course, j.node)
@@ -54,7 +66,7 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
   const generate = async (item: QueueItem) => {
     setBusyKey(`${item.course}/${item.node}`)
     try {
-      const res = await api.generate(item.course, item.node)
+      const res = await api.generate(item.course, item.node, style || undefined)
       Message.success(res.message)
       await Promise.all([load(), frame?.reload()])
     } catch (err) {
@@ -66,7 +78,16 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
 
   return (
     <Space direction='vertical' style={{ width: '100%' }} size={14}>
-      <Card size='small' title='待生成队列' style={{ borderRadius: 10 }}>
+      <Card size='small' title={
+        <Space size={10}>
+          <span>待生成队列</span>
+          {styles.length > 1 && (
+            <Select value={style ?? ''} onChange={v => setStyle(v || undefined)} size='mini' style={{ width: 130 }}>
+              {styles.map(s => <Select.Option key={s || '默认'} value={s}>{s ? `风格：${s}` : '默认风格'}</Select.Option>)}
+            </Select>
+          )}
+        </Space>
+      } style={{ borderRadius: 10 }}>
         <Text type='secondary' style={{ display: 'block', marginBottom: 8 }}>
           来自 生成队列.md（agent 补内容建议 / 内容反馈自动入队）；一键生成后正文落盘 Obsidian，条目自动勾掉。
         </Text>
@@ -110,10 +131,17 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
                 return <Tag size='small' color={t.color}>{t.label}</Tag>
               } },
               { title: '信息', dataIndex: 'message', ellipsis: true },
-              { title: '操作', width: 90, render: (_, j) => (
-                j.status === 'running'
-                  ? <Button size='mini' type='text' status='danger' onClick={() => void cancel(j)}>取消</Button>
-                  : null
+              { title: '操作', width: 170, render: (_, j) => (
+                <Space size={4}>
+                  {j.status === 'running'
+                    ? <Button size='mini' type='text' status='danger' onClick={() => void cancel(j)}>取消</Button>
+                    : null}
+                  {j.status === 'failed' && (
+                    <Button size='mini' type='text' onClick={() =>
+                      discussInHost(j.course, j.node, `上次生成失败：${j.message ?? '（无错误信息）'}。请分析原因并帮我修复，然后重试生成。`)
+                    }>与 AI 讨论</Button>
+                  )}
+                </Space>
               ) },
             ]} />
         )}

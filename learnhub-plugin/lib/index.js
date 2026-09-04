@@ -103,6 +103,12 @@ var init_paths = __esm({
       get promptDir() {
         return `${this.centerStateDir}/\u63D0\u793A\u8BCD`;
       }
+      get learnhubConfigPath() {
+        return `${this.centerStateDir}/learnhub.json`;
+      }
+      get genJobsPath() {
+        return `${this.centerStateDir}/\u751F\u6210\u4EFB\u52A1.json`;
+      }
       get trashDir() {
         return `${this.centerRoot}/.trash`;
       }
@@ -7566,6 +7572,7 @@ var init_store = __esm({
           elapsed_days: Math.round(rec.elapsed_days ?? 0),
           session: rec.session ?? null,
           duration_s: rec.duration_s ?? null,
+          ...rec.xp !== void 0 ? { xp: rec.xp } : {},
           ...rec.detail ? { detail: rec.detail } : {}
         };
         await mkdir2(this.paths.centerStateDir, { recursive: true });
@@ -7613,7 +7620,9 @@ var init_store = __esm({
           correct: rec.correct === void 0 ? null : rec.correct,
           judge: rec.judge,
           ...rec.qid ? { qid: rec.qid } : {},
-          ...rec.feedback ? { feedback: rec.feedback } : {}
+          ...rec.feedback ? { feedback: rec.feedback } : {},
+          ...rec.elapsed_s !== void 0 ? { elapsed_s: Math.round(rec.elapsed_s * 10) / 10 } : {},
+          ...rec.xp !== void 0 ? { xp: rec.xp } : {}
         };
         await mkdir2(this.paths.centerStateDir, { recursive: true });
         await appendFile(this.paths.practicePath, JSON.stringify(full) + "\n", "utf8");
@@ -7693,9 +7702,9 @@ var init_store = __esm({
       async latestSnapshotVersion(course) {
         const dir = this.paths.snapshotDir;
         if (!existsSync(dir)) return 0;
-        const { readdir: readdir4 } = await import("node:fs/promises");
+        const { readdir: readdir5 } = await import("node:fs/promises");
         let max = 0;
-        for (const f of await readdir4(dir)) {
+        for (const f of await readdir5(dir)) {
           const m = f.match(new RegExp(`^${course}-v(\\d+)\\.json$`));
           if (m) max = Math.max(max, Number(m[1]));
         }
@@ -7865,14 +7874,14 @@ var init_notes = __esm({
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync as existsSync7 } from "node:fs";
-import { readFile as readFile10, appendFile as appendFile2, mkdir as mkdir9 } from "node:fs/promises";
+import { readFile as readFile11, appendFile as appendFile2, mkdir as mkdir9 } from "node:fs/promises";
 import { join as join3, resolve as resolvePath, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/engine/index.ts
 init_paths();
 import { existsSync as existsSync6 } from "node:fs";
-import { mkdir as mkdir8, readdir as readdir3, readFile as readFile9, rename as rename3 } from "node:fs/promises";
+import { mkdir as mkdir8, readdir as readdir4, readFile as readFile10, rename as rename3, writeFile as writeFile8 } from "node:fs/promises";
 
 // src/engine/registry.ts
 init_yaml();
@@ -7936,7 +7945,8 @@ init_store();
 init_paths();
 import { readdir, readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3 } from "node:fs/promises";
 import { join } from "node:path";
-var NODE_KEYS = /* @__PURE__ */ new Set(["name", "pre", "opt", "note", "enc"]);
+var NODE_KEYS = /* @__PURE__ */ new Set(["name", "pre", "opt", "note", "enc", "est", "type"]);
+var NODE_TYPES = /* @__PURE__ */ new Set(["practice"]);
 var SchemaError = class extends Error {
 };
 function fail(path, msg) {
@@ -7972,7 +7982,7 @@ function parseNode(raw, path, where) {
   if (typeof raw !== "object" || raw === null) fail(path, `${where} \u8282\u70B9\u5FC5\u987B\u662F\u6620\u5C04`);
   const r = raw;
   const unknown = Object.keys(r).filter((k) => !NODE_KEYS.has(k));
-  if (unknown.length) fail(path, `${where} \u542B\u672A\u77E5\u5B57\u6BB5 ${JSON.stringify(unknown)}\uFF08\u53EA\u5141\u8BB8 name/pre/opt/note/enc\uFF09`);
+  if (unknown.length) fail(path, `${where} \u542B\u672A\u77E5\u5B57\u6BB5 ${JSON.stringify(unknown)}\uFF08\u53EA\u5141\u8BB8 name/pre/opt/note/enc/est/type\uFF09`);
   const name2 = r.name;
   if (typeof name2 !== "string" || !name2.trim()) fail(path, `${where} \u8282\u70B9 name \u7F3A\u5931\u6216\u4E3A\u7A7A`);
   const pre = r.pre ?? [];
@@ -7982,7 +7992,18 @@ function parseNode(raw, path, where) {
   const note = r.note ?? "";
   if (typeof note !== "string") fail(path, `${where}[${name2}] note \u5FC5\u987B\u662F\u5B57\u7B26\u4E32`);
   const enc = parseEnc(r.enc ?? [], path, where, name2);
-  return { name: name2.trim(), pre, opt, note, enc };
+  const node = { name: name2.trim(), pre, opt, note, enc };
+  if (r.est !== void 0) {
+    const est = Number(r.est);
+    if (!Number.isFinite(est) || est <= 0) fail(path, `${where}[${node.name}] est \u5FC5\u987B\u662F\u6B63\u6570\uFF08\u5206\u949F\uFF09`);
+    node.est = Math.round(est);
+  }
+  if (r.type !== void 0) {
+    const type = String(r.type);
+    if (!NODE_TYPES.has(type)) fail(path, `${where}[${node.name}] type \u53EA\u5141\u8BB8 practice`);
+    node.type = type;
+  }
+  return node;
 }
 function loadRegionDoc(doc, path) {
   if (typeof doc !== "object" || doc === null) fail(path, "\u9876\u5C42\u5FC5\u987B\u662F\u6620\u5C04\uFF08region/color/blocks\uFF09");
@@ -8054,6 +8075,8 @@ var GraphStore = class {
           if (n.pre.length) doc.pre = [...n.pre];
           if (n.opt) doc.opt = true;
           if (n.note) doc.note = n.note;
+          if (n.est !== void 0) doc.est = n.est;
+          if (n.type) doc.type = n.type;
           if (n.enc.length) doc.enc = n.enc.map((e) => {
             const edge = { node: e.node, w: e.w };
             if (e.note) edge.note = e.note;
@@ -8086,6 +8109,8 @@ var Graph = class {
           this.encOf[n] = node.enc.map((e) => [e.node, e.w]);
           if (node.opt) this.opt.add(n);
           if (node.note) this.noteOf[n] = node.note;
+          if (node.est !== void 0) this.estOf[n] = node.est;
+          if (node.type) this.typeOf[n] = node.type;
         }
       }
     }
@@ -8145,6 +8170,10 @@ var Graph = class {
   preOf = {};
   opt = /* @__PURE__ */ new Set();
   noteOf = {};
+  /** name → 标称学习时长（分钟；未标注的节点不在表内）。 */
+  estOf = {};
+  /** name → 节点类型（practice 交互实践；普通节点不在表内）。 */
+  typeOf = {};
   regionIdxOf = {};
   /** name → [区序号, 区名, 块名]。 */
   blockOf = {};
@@ -10091,6 +10120,23 @@ init_dates();
 
 // src/engine/params.ts
 var DESIRED_RETENTION = 0.9;
+var FSRS_DIFFICULTY_MID = 5;
+var XP_BASE = {
+  single_choice: 1,
+  true_false: 1,
+  fill_in_blank: 2,
+  reflection: 3,
+  multi_choice: 1,
+  numeric: 2,
+  ordering: 2,
+  matching: 2,
+  open_question: 3
+};
+var XP_GUESS_SECONDS = 5;
+var XP_GUESS_PENALTY = -1;
+var XP_PERFECT_BONUS = 2;
+var XP_PER_NODE_DEFAULT = 12;
+var DAILY_XP_GOAL_DEFAULT = 30;
 
 // src/engine/srs.ts
 var RATING_BY_NUM = {
@@ -10414,16 +10460,21 @@ async function analyzeGraph(courseName, graph, state, store) {
     }
   }
   const lapseHotspots = Object.entries(lapses).map(([node, n]) => ({ node, lapses: n })).filter((h) => h.lapses >= 2).sort((a, b) => b.lapses - a.lapses).slice(0, 10);
-  const nodes = graph.names.map((n) => ({
-    data: {
-      id: n,
-      region: graph.blockOf[n][1],
-      block: graph.blockOf[n][2],
-      depth: graph.depth[n] ?? 0,
-      stage: effectiveStage(state, n),
-      opt: graph.opt.has(n)
-    }
-  }));
+  const nodes = graph.names.map((n) => {
+    const fm = state[n];
+    return {
+      data: {
+        id: n,
+        region: graph.blockOf[n][1],
+        block: graph.blockOf[n][2],
+        depth: graph.depth[n] ?? 0,
+        stage: effectiveStage(state, n),
+        opt: graph.opt.has(n),
+        mastery: Math.max(fm?.mastery ?? 0, fm?.practice_ema ?? 0),
+        ...graph.typeOf[n] ? { type: graph.typeOf[n] } : {}
+      }
+    };
+  });
   const edges = [
     ...graph.edges.map(([u, v]) => ({ data: { id: `${u}->${v}`, source: u, target: v, kind: "pre" } })),
     ...Object.entries(graph.encOf).flatMap(([u, list]) => list.map(([v, w]) => ({ data: { id: `${u}~enc~${v}`, source: u, target: v, kind: "enc", w } })))
@@ -10450,8 +10501,76 @@ async function analyzeGraph(courseName, graph, state, store) {
 // src/engine/content.ts
 init_dates();
 init_notes();
-import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5 } from "node:fs/promises";
+import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, readdir as readdir3 } from "node:fs/promises";
 import { existsSync as existsSync2 } from "node:fs";
+
+// shared/content-renderers.ts
+var RENDERERS = [
+  {
+    lang: "mermaid",
+    label: "Mermaid \u56FE",
+    hint: "\u6D41\u7A0B\u56FE\u3001\u65F6\u5E8F\u56FE\u3001\u72B6\u6001\u56FE\u7B49\u77E2\u91CF\u793A\u610F\u56FE",
+    example: "```mermaid\ngraph LR\nA[\u6982\u5FF5] --> B[\u5E94\u7528]\n```"
+  },
+  {
+    lang: "math",
+    label: "\u6570\u5B66\u516C\u5F0F",
+    hint: "KaTeX \u6392\u7248\uFF1B\u884C\u5185 $...$\u3001\u72EC\u7ACB\u6210\u884C $$...$$\uFF0C\u76F4\u63A5\u5199\u5728\u6B63\u6587\u91CC\uFF0C\u4E0D\u7528\u4EE3\u7801\u5757",
+    example: "\u884C\u5185 $E = mc^2$\uFF1B\u72EC\u7ACB\u516C\u5F0F $$\\int_0^1 x^2\\,dx = \\tfrac{1}{3}$$"
+  },
+  {
+    lang: "media",
+    label: "\u97F3\u89C6\u9891",
+    hint: "\u4EE3\u7801\u5757\u5185\u6BCF\u884C\u5199\u4E00\u4E2A vault \u76F8\u5BF9\u5A92\u4F53\u8DEF\u5F84\uFF0C\u6309\u6269\u5C55\u540D\u6E32\u67D3\u4E3A\u89C6\u9891/\u97F3\u9891\u64AD\u653E\u5668",
+    example: "```media\n<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/demo.mp4\n```"
+  },
+  {
+    lang: "interactive",
+    label: "\u4EA4\u4E92\u6A21\u62DF",
+    hint: "\u4EE3\u7801\u5757\u5185\u5199\u4E00\u4E2A vault \u76F8\u5BF9 HTML \u8DEF\u5F84\uFF08\u81EA\u5305\u542B\u4EA4\u4E92\u4EF6\uFF0C\u7981\u5916\u8054\uFF09\uFF0C\u9762\u677F\u5185\u5D4C\u6C99\u7BB1\u6E32\u67D3\uFF1B\u4EA4\u4E92\u4EF6\u7ED3\u5C3E\u5E94 postMessage({type:'LEARNHUB_COMPLETE'},'*') \u4E0A\u62A5\u5B8C\u6210",
+    example: "```interactive\n<\u8BFE\u7A0B\u6839>/\u4EA4\u4E92/\u5355\u6446\u6A21\u62DF.html\n```"
+  }
+];
+function rendererCapabilityBlock() {
+  const out = ["## \u9762\u677F\u652F\u6301\u7684\u6E32\u67D3\u683C\u5F0F\uFF08\u53EA\u80FD\u4F7F\u7528\u4E0B\u5217\u683C\u5F0F\uFF1B\u672A\u5217\u51FA\u7684\u683C\u5F0F\u9762\u677F\u65E0\u6CD5\u6E32\u67D3\uFF0C\u5199\u4E86\u7B49\u4E8E\u6CA1\u5199\uFF09", ""];
+  for (const r of RENDERERS) {
+    out.push(`- **${r.label}**\uFF1A${r.hint}\u3002\u5199\u6CD5\uFF1A`, "", r.example, "");
+  }
+  out.push("- **\u56FE\u7247/\u52A8\u753B**\uFF1A`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]`\uFF08\u652F\u6301 png/jpg/webp/gif/svg\uFF0C\u8DEF\u5F84\u76F8\u5BF9 vault \u6839\uFF09", "");
+  return out.join("\n");
+}
+var PLAIN_CODE_LANGS = /* @__PURE__ */ new Set([
+  "text",
+  "plain",
+  "txt",
+  "code",
+  "yaml",
+  "yml",
+  "json",
+  "bash",
+  "sh",
+  "shell",
+  "python",
+  "py",
+  "js",
+  "javascript",
+  "ts",
+  "typescript",
+  "sql",
+  "java",
+  "c",
+  "cpp",
+  "html",
+  "css",
+  "xml",
+  "md",
+  "markdown",
+  "diff",
+  "none",
+  ""
+]);
+
+// src/engine/content.ts
 var QUEUE_GENERATE = "\u751F\u6210";
 var QUEUE_REGEN = "\u91CD\u751F\u6210";
 var Content = class _Content {
@@ -10532,10 +10651,11 @@ var Content = class _Content {
     const succs = graph.succ[node] ?? [];
     const enc = graph.encOf[node] ?? [];
     const dSelf = graph.depth[node] ?? 0;
+    const isPractice = graph.typeOf[node] === "practice";
     const out = [];
     out.push(`# \u751F\u6210\u4E0A\u4E0B\u6587\u5305\uFF1A${node}`, "");
     out.push("## 1. \u76EE\u6807\u8282\u70B9");
-    out.push(`- \u540D\u79F0\uFF1A${node} \uFF5C \u533A/\u5757\uFF1A${region} \xB7 ${block} \uFF5C \u6DF1\u5EA6\uFF1A${dSelf}`);
+    out.push(`- \u540D\u79F0\uFF1A${node} \uFF5C \u533A/\u5757\uFF1A${region} \xB7 ${block} \uFF5C \u6DF1\u5EA6\uFF1A${dSelf}${isPractice ? " \uFF5C \u7C7B\u578B\uFF1A\u4EA4\u4E92\u5B9E\u8DF5\uFF08practice\uFF09" : ""}`);
     out.push(`- pre\uFF1A${pres.length ? pres.join("\u3001") : "\uFF08\u65E0\uFF0C\u6839\u8282\u70B9\uFF09"}`);
     if (graph.noteOf[node]) out.push(`- note\uFF1A${graph.noteOf[node]}`);
     out.push("");
@@ -10564,19 +10684,48 @@ var Content = class _Content {
     out.push("## 6. \u89C4\u8303\u7EA6\u675F");
     out.push("- \u522B\u540D\u7EDF\u4E00\u8868\uFF1A\u9E3D\u5DE2\u539F\u7406\uFF08\u975E\u62BD\u5C49\u539F\u7406\uFF09\u3001\u52FE\u80A1\u5B9A\u7406\uFF08\u975E\u6BD5\u8FBE\u54E5\u62C9\u65AF\u5B9A\u7406\uFF09\u3001\u4F59\u5F26\u5B9A\u7406\uFF08\u975E\u963F\u5C14\xB7\u5361\u897F\u5B9A\u7406\uFF09\u2014\u2014\u5B8C\u6574\u8868\u89C1 \u7406\u5FF5\u4E0E\u89C4\u8303.md \xA78");
     out.push("- \u98CE\u683C\uFF1A\u6210\u4EBA\u81EA\u5B66\u8005\uFF1B\u76F4\u89C9\u5148\u4E8E\u4E25\u683C\u3001\u5177\u4F53\u5148\u4E8E\u62BD\u8C61\u3001\u6280\u80FD\u5148\u4E8E\u5F62\u5F0F\u5316");
-    out.push("- \u7BC7\u5E45\uFF1A\u6B63\u6587 \u2264 2500 \u5B57\uFF1B\u7EC3\u4E60 \u57FA\u7840 2\u20134 / \u53D8\u5F0F 2\u20133 / \u6311\u6218 0\u20132");
-    out.push("- \u6A21\u677F\uFF1A\u4E3A\u4EC0\u4E48\u9700\u8981\u5B83/\u5B9A\u4E49\u4E0E\u6027\u8D28/\u4F8B\u9898/\u7EC3\u4E60/\u5E38\u89C1\u8BEF\u533A/\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988");
+    out.push(isPractice ? "- \u7BC7\u5E45\uFF1A\u8BF4\u660E\u6587\u5B57 \u2264 400 \u5B57\uFF1B\u6838\u5FC3\u4EA4\u4ED8\u7269\u662F\u4EA4\u4E92\u6A21\u62DF\uFF08\u89C4\u8303\u89C1 \xA78\uFF09" : "- \u7BC7\u5E45\uFF1A\u6B63\u6587 \u2264 2500 \u5B57\uFF1B\u7EC3\u4E60 \u57FA\u7840 2\u20134 / \u53D8\u5F0F 2\u20133 / \u6311\u6218 0\u20132");
+    out.push("- \u5C0F\u8282\uFF1A\u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u6807\u9898\uFF08\u6982\u5FF5\uFF1AX / \u4F8B\u9898\uFF1AX / \u6F14\u793A\uFF1AX / \u5C0F\u7ED3\uFF1AX\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \u627F\u4E0A\u542F\u4E0B\u3001\u5185\u5BB9\u53CD\u9988");
     out.push("");
     out.push("## 7. \u65E2\u6709 enc \u8FB9\uFF08\u7EC3\u4E60\u5FC5\u987B\u771F\u5B9E\u8C03\u7528\u5B83\u4EEC\uFF09");
     out.push(enc.length ? enc.map(([t, w]) => `${t}(w=${w.toFixed(1)})`).join("\u3001") : "\uFF08\u6682\u65E0\uFF09");
     out.push("");
     out.push("## 8. \u4EA4\u4ED8\u8981\u6C42");
-    out.push("- \u7EC3\u4E60\u9898\u4EE5\u9898\u7EC4 YAML \u7ECF learnhub_exercises_gen \u5199\u5165\uFF08\u4E0D\u518D\u76F4\u63A5\u5199\u8FDB\u6B63\u6587\u7EC3\u4E60\u533A\uFF09\uFF1B\u6570\u503C\u9898\u7ED9 tol \u5BB9\u5DEE");
-    out.push("- \u9898\u578B\u4F18\u5148 single_choice / true_false / fill_in_blank\uFF08\u53EF\u673A\u5668\u5224\u5377\uFF09\uFF1B\u5F00\u653E\u6027\u95EE\u7B54\u9898\u7528 reflection \u5E76\u5728 answer \u5199\u8BC4\u5206\u8981\u70B9");
-    out.push("- \u672B\u5C3E\u673A\u5668\u5757\uFF1A`<!-- enc_candidates: [\u672C\u8BFE\u7EC3\u4E60\u771F\u5B9E\u8C03\u7528\u7684\u524D\u7F6E\u6280\u80FD] -->`");
+    if (isPractice) {
+      out.push(_Content.interactiveSpecBlock());
+      out.push("- \u672B\u5C3E\u673A\u5668\u5757\uFF1A`<!-- enc_candidates: [] -->`\uFF08\u4EA4\u4E92\u5B9E\u8DF5\u4E0D\u51FA\u7EC3\u4E60\u9898\uFF09");
+    } else {
+      out.push("- \u7EC3\u4E60\u9898\u4EE5\u9898\u7EC4 YAML \u7ECF learnhub_exercises_gen \u5199\u5165\uFF08\u4E0D\u518D\u76F4\u63A5\u5199\u8FDB\u6B63\u6587\u7EC3\u4E60\u533A\uFF09\uFF1B\u6570\u503C\u9898\u7ED9 tol \u5BB9\u5DEE");
+      out.push("- \u9898\u578B\u4F18\u5148 single_choice / true_false / fill_in_blank\uFF08\u53EF\u673A\u5668\u5224\u5377\uFF09\uFF1B\u5F00\u653E\u6027\u95EE\u7B54\u9898\u7528 reflection \u5E76\u5728 answer \u5199\u8BC4\u5206\u8981\u70B9");
+      out.push("- \u672B\u5C3E\u673A\u5668\u5757\uFF1A`<!-- enc_candidates: [\u672C\u8BFE\u7EC3\u4E60\u771F\u5B9E\u8C03\u7528\u7684\u524D\u7F6E\u6280\u80FD] -->`");
+    }
     return out.join("\n") + "\n";
   }
   // ---- 提示词模板 ----
+  /** practice 节点交互件创作规范（注入上下文包 §8；契约吸收 OpenMAIC simulation 生成经验）。 */
+  static interactiveSpecBlock() {
+    return `### \u4EA4\u4E92\u6A21\u62DF\u521B\u4F5C\u89C4\u8303\uFF08\u672C\u8282\u70B9\u7684\u6838\u5FC3\u4EA4\u4ED8\u7269\uFF09
+
+\u8F93\u51FA\u4E00\u4E2A\u5B8C\u6574\u81EA\u5305\u542B\u7684 HTML \u6587\u6863\uFF0C\u5305\u88F9\u5728\u6807\u8BB0\u5757\u4E2D\uFF08\u7CFB\u7EDF\u4F1A\u843D\u76D8\u4E3A\u72EC\u7ACB\u6587\u4EF6\u5E76\u66FF\u6362\u4E3A\u5F15\u7528\u5757\uFF09\uFF1A
+
+\`\`\`learnhub-interactive:\u4EA4\u4E92/<\u8BED\u4E49\u5316\u540D\u79F0>.html
+<!DOCTYPE html>
+...\uFF08\u5B8C\u6574 HTML\uFF09
+\`\`\`
+
+\u786C\u6027\u8981\u6C42\uFF1A
+1. \u5355\u6587\u4EF6\u81EA\u5305\u542B\uFF1A\u5168\u90E8 CSS/JS \u5185\u8054\uFF1B\u7981\u6B62\u5916\u90E8 CDN\u3001\u7F51\u7EDC\u8BF7\u6C42\u4E0E\u56FE\u7247\uFF08\u6C99\u7BB1\u5185\u4E0D\u53EF\u52A0\u8F7D\uFF09\u2014\u2014\u56FE\u5F62\u4E00\u5F8B canvas/SVG/DOM \u7ED8\u5236\u3002
+2. \u53D8\u91CF\u4E0E\u9884\u8BBE\uFF1A\u81F3\u5C11 2 \u4E2A\u53EF\u8C03\u53D8\u91CF\uFF08\u6ED1\u6746\uFF09\uFF0C\u22652 \u4E2A\u9884\u8BBE\u6309\u94AE\uFF1B\u5E94\u7528\u9884\u8BBE\u5FC5\u987B\u5B8C\u6574\u590D\u4F4D\u6A21\u62DF\u540E\u518D\u8FD0\u884C\u3002
+3. \u72B6\u6001\u673A\u6E05\u6670\uFF1Arunning/paused/ended \u4E09\u6001\u5206\u79BB\uFF1Breset \u6309\u94AE\u590D\u4F4D**\u6240\u6709**\u72B6\u6001\u53D8\u91CF\uFF1B\u6309\u94AE\u6587\u6848\u4E0E\u70B9\u51FB\u540E\u7684\u52A8\u4F5C\u4E00\u81F4\uFF08\u542F\u52A8/\u6682\u505C/\u7EE7\u7EED/\u91CD\u65B0\u5F00\u59CB\uFF09\u3002
+4. \u52A8\u753B\u5FC5\u987B\u8089\u773C\u53EF\u89C1\uFF1A\u542F\u52A8\u540E\u5BF9\u8C61\u660E\u663E\u79FB\u52A8/\u65CB\u8F6C/\u53D8\u5316\uFF08requestAnimationFrame\uFF09\uFF0C\u8BA9\u5B66\u4E60\u8005\u4E00\u773C\u786E\u8BA4\u300C\u5728\u52A8\u300D\u3002
+5. \u79FB\u52A8\u7AEF\u53CB\u597D\uFF1A\u63A7\u5236\u533A\u4E0E\u753B\u5E03\u4E0A\u4E0B\u5806\u53E0\u4E0D\u91CD\u53E0\uFF08320px \u5BBD\u53EF\u6D4B\u8BD5\uFF09\uFF1B\u89E6\u63A7\u76EE\u6807 \u226544px\uFF1Bcanvas \u7528 ResizeObserver \u81EA\u9002\u5E94\u5BB9\u5668\u3002
+6. \u5B9E\u65F6\u6570\u636E\uFF1A\u5173\u952E\u6570\u503C\u7528\u7B49\u5BBD\u5B57\u4F53\u663E\u793A\u5E76\u5E26\u5355\u4F4D\uFF1B\u7ED3\u675F\u65F6\u7ED9\u51FA\u6210\u8D25/\u7ED3\u8BBA\u53CD\u9988\u3002
+7. \u5B8C\u6210\u4E0A\u62A5\uFF1A\u5728\u6587\u6863\u672B\u5C3E\u52A0
+   \`<script>window.parent.postMessage({type:'LEARNHUB_COMPLETE'}, '*')</script>\`
+   \uFF08\u5B66\u4E60\u8005\u70B9\u51FB\u300C\u5B8C\u6210\u6F14\u793A\u300D\u6216\u8FBE\u6210\u6A21\u62DF\u76EE\u6807\u65F6\u89E6\u53D1\uFF09\u3002
+8. \u65E0\u969C\u788D\uFF1A\u63A7\u4EF6\u52A0 ARIA \u6807\u7B7E\uFF1B\u753B\u5E03\u6587\u5B57\u9AD8\u5BF9\u6BD4\u3002
+\u8BF4\u660E\u6587\u5B57\uFF08\u4E0A\u4E0B\u6587\u5305\u6B63\u6587\uFF09\u53EA\u505A\u5BFC\u89C8\uFF1A\u770B\u4EC0\u4E48\u3001\u8C03\u4EC0\u4E48\u3001\u89C2\u5BDF\u4EC0\u4E48\u89C4\u5F8B\uFF0C\u2264 400 \u5B57\u3002`;
+  }
   static PROMPT_KINDS = {
     \u8BFE\u7A0B\u751F\u6210: `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
 
@@ -10586,8 +10735,49 @@ var Content = class _Content {
 
 1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
 2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
-3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u987A\u5E8F\uFF1A\u4E3A\u4EC0\u4E48\u9700\u8981\u5B83 / \u5B9A\u4E49\u4E0E\u6027\u8D28 / \u4F8B\u9898 / \u5E38\u89C1\u8BEF\u533A / \u627F\u4E0A\u542F\u4E0B / \u5185\u5BB9\u53CD\u9988\u3002
-4. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\u3001\`## \u4F8B\u9898\uFF1A\u5224\u65AD\u4E00\u4E2A\u6570\u5C5E\u4E8E\u54EA\u7C7B\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
+4. \u8282\u7684\u539F\u5B50\u6027\uFF1A\u4E00\u8282\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF0C\u6587\u5B57\u7CBE\u70BC\uFF08\u2264300 \u5B57\uFF09\uFF1B\u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\uFF08dual-coding\uFF1A\u53EF\u89C6\u5316\u4E0E\u6587\u5B57\u4E92\u76F8\u8865\u5145\uFF0C\u4E0D\u662F\u88C5\u9970\uFF09\u3002
+5. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+
+{{renderers}}
+
+## \u8F93\u51FA
+
+\u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
+`,
+    "\u8BFE\u7A0B\u751F\u6210-\u82CF\u683C\u62C9\u5E95": `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u82CF\u683C\u62C9\u5E95\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u82CF\u683C\u62C9\u5E95\u5F0F\u5BFC\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u4E3A\u300C\u76EE\u6807\u8282\u70B9\u300D\u5199\u4E00\u8282\u4EE5\u5F15\u5BFC\u63D0\u95EE\u4E3A\u4E3B\u7EBF\u7684\u8BFE\u7A0B\u7B14\u8BB0\uFF1A\u5C11\u7ED9\u7ED3\u8BBA\uFF0C\u591A\u7ED9\u300C\u597D\u95EE\u9898 + \u9010\u6B65\u903C\u8FD1\u7684\u601D\u8DEF\u300D\uFF0C\u8BA9\u5B66\u4E60\u8005\u5728\u56DE\u7B54\u95EE\u9898\u4E2D\u81EA\u5DF1\u5EFA\u6784\u77E5\u8BC6\u3002
+
+## \u786C\u7EA6\u675F\uFF08\u8FDD\u53CD\u5373\u8FD4\u5DE5\uFF09
+
+1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
+2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
+3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
+4. \u8282\u7684\u539F\u5B50\u6027\uFF1A\u4E00\u8282\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF1B\u6BCF\u4E2A\u300C\u6982\u5FF5\u300D\u8282\u81F3\u5C11 2 \u4E2A\u9636\u68AF\u5F0F\u5F15\u5BFC\u95EE\u9898\uFF08\u5148\u5177\u4F53\u540E\u62BD\u8C61\uFF09\uFF0C\u95EE\u9898\u540E\u7D27\u8DDF\u300C\u951A\u70B9\u300D\u2014\u2014\u4E00\u4E24\u53E5\u6700\u4F4E\u9650\u5EA6\u7684\u6B63\u786E\u65B9\u5411\u63D0\u793A\uFF08\u4E0D\u662F\u7B54\u6848\uFF09\u3002
+5. \u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\u3002
+6. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+
+{{renderers}}
+
+## \u8F93\u51FA
+
+\u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
+`,
+    "\u8BFE\u7A0B\u751F\u6210-\u8D39\u66FC": `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u8D39\u66FC\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8D39\u66FC\u5F0F\u8BB2\u89E3\u5458\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u4E3A\u300C\u76EE\u6807\u8282\u70B9\u300D\u5199\u4E00\u8282\u300C\u4EE5\u6559\u4EE3\u5B66\u300D\u7684\u8BFE\u7A0B\u7B14\u8BB0\uFF1A\u5047\u8BBE\u5B66\u4E60\u8005\u8981\u628A\u8FD9\u8282\u8BFE\u8BB2\u7ED9\u4E00\u4E2A\u806A\u660E\u7684\u5341\u4E8C\u5C81\u5B69\u5B50\u542C\uFF0C\u7528\u6700\u6734\u7D20\u7684\u7C7B\u6BD4\u548C\u65E5\u5E38\u8BED\u8A00\u628A\u6982\u5FF5\u8BB2\u900F\uFF0C\u518D\u9010\u6B65\u5F15\u5165\u6B63\u5F0F\u8BB0\u53F7\u3002
+
+## \u786C\u7EA6\u675F\uFF08\u8FDD\u53CD\u5373\u8FD4\u5DE5\uFF09
+
+1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
+2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
+3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
+4. \u6BCF\u4E2A\u6838\u5FC3\u6982\u5FF5\u5FC5\u987B\u6709\uFF1A\u4E00\u4E2A\u751F\u6D3B\u7C7B\u6BD4\uFF08\u5E76\u660E\u786E\u8BF4\u7C7B\u6BD4\u5728\u54EA\u91CC\u5931\u6548\uFF09\u2192 \u6734\u7D20\u8BED\u8A00\u89E3\u91CA \u2192 \u6B63\u5F0F\u5B9A\u4E49/\u8BB0\u53F7\uFF1B\u6BCF\u8282\u6536\u4E00\u4E2A\u300C\u8BB2\u7ED9\u522B\u4EBA\u542C\u300D\u7684\u81EA\u6D4B\u95EE\u9898\u3002
+5. \u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\u3002
+6. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+
+{{renderers}}
 
 ## \u8F93\u51FA
 
@@ -10599,11 +10789,21 @@ var Content = class _Content {
 
 ## \u786C\u7EA6\u675F
 
-1. \u9898\u578B\u5FC5\u987B\u591A\u6837\u4E14\u53EA\u7528\u8FD9\u4E09\u79CD\uFF1A\u5355\u9009\uFF08single_choice\uFF09\u3001\u5224\u65AD\uFF08true_false\uFF09\u3001\u586B\u7A7A\uFF08fill_in_blank\uFF09\uFF0C\u6BCF\u79CD\u81F3\u5C11\u4E00\u9053\uFF0C\u4E0D\u8981\u5168\u51FA\u540C\u4E00\u9898\u578B\u3002
-2. \u96BE\u5EA6\u9012\u8FDB\uFF1A\u5F00\u5934 1-2 \u9053\u6982\u5FF5\u8FA8\u6790\uFF08difficulty: 1\uFF09\uFF0C\u4E2D\u95F4\u5E94\u7528\u4E0E\u8BA1\u7B97\uFF08difficulty: 2\uFF09\uFF0C\u6536\u5C3E 1-2 \u9053\u7EFC\u5408\u6216\u6613\u9519\u9677\u9631\uFF08difficulty: 3\uFF09\u3002
+1. \u9898\u578B\u5FC5\u987B\u591A\u6837\uFF0C\u53EA\u7528\u4EE5\u4E0B\u4E5D\u79CD\uFF0C\u4E0D\u8981\u5168\u51FA\u540C\u4E00\u9898\u578B\uFF1A
+   - \u5355\u9009\uFF08single_choice\uFF09\uFF1Aoptions \u5217 4 \u9879\u3001answer \u4E3A\u4E00\u4E2A\u6B63\u786E\u9009\u9879\u5B57\u6BCD\u3002
+   - \u591A\u9009\uFF08multi_choice\uFF09\uFF1Aoptions \u5217 4 \u9879\u3001answer \u4E3A\u6B63\u786E\u9009\u9879**\u5B57\u6BCD\u6570\u7EC4**\uFF08\u5982 ["A","C"]\uFF0C\u81F3\u5C11 2 \u4E2A\u6B63\u786E\u9879\uFF09\u3002
+   - \u5224\u65AD\uFF08true_false\uFF09\uFF1Aanswer \u4E3A \u5BF9/\u9519\u3002
+   - \u586B\u7A7A\uFF08fill_in_blank\uFF09\uFF1Aanswer \u4E3A**\u53EF\u63A5\u53D7\u7B54\u6848\u6570\u7EC4**\uFF08\u540C\u4E49\u5199\u6CD5\u90FD\u5217\u51FA\uFF09\u3002
+   - \u6570\u503C\uFF08numeric\uFF09\uFF1Aanswer \u4E3A\u6570\u503C\uFF0C\u5FC5\u987B\u540C\u65F6\u7ED9 tol \u5BB9\u5DEE\uFF08\u5982 0.01\uFF09\uFF1B\u9002\u5408\u8BA1\u7B97/\u4F30\u7B97\u9898\u3002
+   - \u6392\u5E8F\uFF08ordering\uFF09\uFF1Aoptions \u4E3A**\u4E71\u5E8F**\u7684\u6B65\u9AA4/\u4E8B\u4EF6\u9879\uFF08\u6BCF\u9879\u77ED\u4E14\u4E92\u4E0D\u76F8\u540C\uFF09\u3001answer \u4E3A**\u6B63\u786E\u987A\u5E8F\u7684\u9879\u6587\u672C\u6570\u7EC4**\uFF08\u540C\u4E00\u7EC4\u9879\u7684\u91CD\u6392\uFF09\u3002
+   - \u914D\u5BF9\uFF08matching\uFF09\uFF1Aoptions \u4E3A\u5DE6\u5217\u9879\uFF08\u22652\uFF0C\u77ED\u4E14\u4E92\u5F02\uFF09\u3001answer \u4E3A\u4E0E\u5DE6\u5217**\u4E00\u4E00\u5BF9\u5E94**\u7684\u53F3\u5217\u6587\u672C\u6570\u7EC4\uFF08\u7B2C i \u9879\u662F\u7B2C i \u4E2A\u5DE6\u9879\u7684\u914D\u5BF9\uFF09\u3002
+   - \u53CD\u601D\uFF08reflection\uFF09\uFF1A\u5F00\u653E\u5F0F\u5C0F\u53CD\u601D\uFF0Canswer \u5199\u8BC4\u5206\u8981\u70B9\u3002
+   - \u5F00\u653E\u9898\uFF08open_question\uFF09\uFF1A**\u8003\u6574\u4E2A\u8BFE\u65F6\u5185\u5BB9\u7684\u7EFC\u5408\u5E94\u7528**\uFF08\u8DE8\u8282\u7EFC\u5408\uFF0C\u4E0D\u662F\u5355\u8282\u7EC6\u8282\uFF09\uFF0Csection \u56FA\u5B9A\u5199\u300C\u901A\u7528\u300D\uFF1Banswer \u5199\u53C2\u8003\u8981\u70B9\uFF08\u53EF\u7701\u7565\uFF09\u3002\u6BCF\u8F6E\u6700\u591A 1 \u9053\u3002
+2. \u96BE\u5EA6\u9012\u8FDB\uFF1A\u5F00\u5934 1-2 \u9053\u6982\u5FF5\u8FA8\u6790\uFF08difficulty: 1\uFF09\uFF0C\u4E2D\u95F4\u5E94\u7528\u4E0E\u8BA1\u7B97\uFF08difficulty: 2\uFF09\uFF0C\u6536\u5C3E\u7EFC\u5408\u6216\u6613\u9519\u9677\u9631\uFF08difficulty: 3\uFF09+ \u81F3\u591A 1 \u9053\u5F00\u653E\u9898\u3002
 3. \u6BCF\u9898\u5FC5\u987B\u7ED9\u5168\uFF1A\u9898\u5E72\u3001\u7B54\u6848\u3001\u89E3\u6790\uFF08\u8BF4\u660E\u4E3A\u4EC0\u4E48\u5BF9\u3001\u9519\u8BEF\u9009\u9879\u9519\u5728\u54EA\uFF09\u3002
 4. \u53EA\u8003\u6B63\u6587\u91CC\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u4E0D\u5F97\u5F15\u5165\u6B63\u6587\u6CA1\u6709\u7684\u6982\u5FF5\u3001\u8BB0\u53F7\u6216\u7ED3\u8BBA\u3002
 5. \u9009\u62E9\u9898 options \u4E0D\u5E26 A./B. \u7F16\u53F7\u524D\u7F00\uFF08\u7CFB\u7EDF\u81EA\u52A8\u7F16\u53F7\uFF09\uFF1B\u586B\u7A7A\u9898 answer \u7528\u6570\u7EC4\u5217\u51FA\u6240\u6709\u53EF\u63A5\u53D7\u5199\u6CD5\uFF1Bnode \u5B57\u6BB5\u539F\u6837\u7167\u6284\u7CFB\u7EDF\u7ED9\u51FA\u7684\u8282\u70B9\u540D\u3002
+6. \u6BCF\u9898\u6807\u6CE8 \`section\`\uFF1A\u8BE5\u9898\u8003\u5BDF\u5185\u5BB9\u6240\u5728\u8282\u7684\u6807\u9898\u539F\u6587\uFF08\u7167\u6284\u6B63\u6587\u8282\u6807\u9898\uFF0C\u5982\u300C\u6982\u5FF5\uFF1A\u5B9A\u4E49\u4E0E\u6027\u8D28\u300D\uFF09\uFF1B\u8DE8\u8282\u7EFC\u5408\u9898\u5199\u300C\u901A\u7528\u300D\u3002
 
 ## \u8F93\u51FA
 
@@ -10618,17 +10818,35 @@ questions:
     answer: A
     explanation: \u89E3\u6790
     difficulty: 1
+    section: \u6982\u5FF5\uFF1A\u5B9A\u4E49\u4E0E\u6027\u8D28
     uses: [\u7528\u5230\u7684\u524D\u7F6E\u6982\u5FF5]
 `
   };
-  /** 读提示词模板；不存在时写入内置默认。 */
+  /** 读提示词模板；内置类型不存在时写入内置默认，非内置类型要求用户已自建同名文件。
+   * {{renderers}} 占位符注入渲染能力清单；旧模板缺占位符时在末尾追加注入段（运行时兜底，不改用户文件）。 */
   async loadPrompt(kind) {
     const builtin = _Content.PROMPT_KINDS[kind];
-    if (!builtin) throw new Error(`[prompt] \u672A\u77E5\u63D0\u793A\u8BCD\u7C7B\u578B: ${kind}\uFF08\u53EF\u9009\uFF1A${Object.keys(_Content.PROMPT_KINDS).join("\u3001")}\uFF09`);
     await mkdir5(this.paths.promptDir, { recursive: true });
     const p = `${this.paths.promptDir}/${kind}.md`;
+    if (!builtin && !existsSync2(p)) {
+      throw new Error(`[prompt] \u672A\u77E5\u63D0\u793A\u8BCD\u7C7B\u578B: ${kind}\uFF08\u5185\u7F6E\uFF1A${Object.keys(_Content.PROMPT_KINDS).join("\u3001")}\uFF1B\u6216\u5728 state/\u63D0\u793A\u8BCD/ \u81EA\u5EFA ${kind}.md\uFF09`);
+    }
     if (!existsSync2(p)) await writeFile5(p, builtin, "utf8");
-    return readFile6(p, "utf8");
+    const text = await readFile6(p, "utf8");
+    const caps = rendererCapabilityBlock();
+    if (text.includes("{{renderers}}")) return text.replaceAll("{{renderers}}", caps);
+    return text.trimEnd() + "\n\n" + caps;
+  }
+  /** 可用提示词类型 = 内置 + state/提示词/ 下的自建变体（去 .md）。 */
+  async promptKinds() {
+    const names = new Set(Object.keys(_Content.PROMPT_KINDS));
+    try {
+      for (const f of await readdir3(this.paths.promptDir)) {
+        if (f.endsWith(".md")) names.add(f.replace(/\.md$/, ""));
+      }
+    } catch {
+    }
+    return [...names].sort();
   }
   // ---- 质检门 ----
   /** 解析课程理念与规范.md §8 别名表 → {不采用名: 采用名}。 */
@@ -10675,6 +10893,16 @@ questions:
     const table = await this.aliasTable(root);
     return Object.entries(table).filter(([bad]) => body.includes(bad)).map(([bad, good]) => `\u522B\u540D\u4E0D\u4E00\u81F4: \u6B63\u6587\u7528\u4E86\u300C${bad}\u300D\uFF0C\u5E94\u91C7\u7528\u300C${good}\u300D`);
   }
+  /** 未注册的代码块语言（面板无渲染器、会降级为源码显示）→ 警告，防 AI 产出渲染不了的块。 */
+  static checkRendererLangs(body) {
+    const known = new Set(RENDERERS.map((r) => r.lang));
+    const hits = /* @__PURE__ */ new Set();
+    for (const m of body.matchAll(/^```([A-Za-z0-9_-]+)/gm)) {
+      const lang = m[1].toLowerCase();
+      if (lang && !known.has(lang) && !PLAIN_CODE_LANGS.has(lang)) hits.add(lang);
+    }
+    return [...hits].sort();
+  }
   /** 跑全部可自动化的质检门 → (passed, findings, warns)。 */
   async gateReport(graph, root, node, body) {
     const findings = [];
@@ -10684,7 +10912,40 @@ questions:
     findings.push(...await this.checkAliases(root, body));
     const usesMarked = /<!--\s*ex:\d+/.test(body) && /uses:\s*\[[^\]]/.test(body);
     if (!usesMarked) warns.push("\u7EC3\u4E60\u5143\u6570\u636E\u7F3A\u5C11 uses \u6807\u6CE8\uFF08\u4E00\u671F\u5C3D\u529B\u6807\u6CE8\uFF0C\u5EFA\u8BAE\u8865\u4E0A\uFF09");
+    const badLangs = _Content.checkRendererLangs(body);
+    if (badLangs.length) warns.push(`\u672A\u6CE8\u518C\u7684\u4EE3\u7801\u5757\u8BED\u8A00\uFF08\u9762\u677F\u65E0\u6CD5\u6E32\u67D3\uFF0C\u8BF7\u6539\u7528\u652F\u6301\u7684\u683C\u5F0F\uFF09: ${badLangs.join("\u3001")}`);
+    const missingInteractive = [];
+    for (const m of body.matchAll(/```interactive\n([^\n]+)\n```/g)) {
+      const rel = m[1].trim();
+      if (!existsSync2(`${this.paths.centerRoot}/${rel}`)) missingInteractive.push(rel);
+    }
+    if (missingInteractive.length) {
+      findings.push(`interactive \u5F15\u7528\u7684\u4EA4\u4E92\u4EF6\u6587\u4EF6\u4E0D\u5B58\u5728: ${missingInteractive.join("\u3001")}`);
+    }
     return { passed: !findings.length, findings, warns };
+  }
+  /** 解析正文中的 learnhub-interactive 标记块 → (替换后的正文, 待落盘交互件, 非法路径列表)。
+   * 标记块 ```learnhub-interactive:<课程根相对路径> + 完整 HTML``` → 正文替换为
+   * ```interactive 引用块（vault 相对路径），HTML 由 contentApply 在质检门前落盘。 */
+  static extractInteractive(body, courseRoot) {
+    const files = [];
+    const invalid = [];
+    const out = body.replace(
+      /```learnhub-interactive:([^\n]+)\n([\s\S]*?)```/g,
+      (whole, rawRel, html) => {
+        const rel = rawRel.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        const bad = !rel || !rel.toLowerCase().endsWith(".html") || rel.split("/").some((seg) => !seg || seg === "." || seg === "..");
+        if (bad) {
+          invalid.push(rawRel.trim());
+          return whole;
+        }
+        files.push({ rel, html: html.trim() + "\n" });
+        return `\`\`\`interactive
+${courseRoot}/${rel}
+\`\`\``;
+      }
+    );
+    return { body: out, files, invalid };
   }
   // ---- 练习区 ----
   /** 解析练习元数据行 → [{ex, answer, check, difficulty, uses, options?, tol?}]。 */
@@ -11230,13 +11491,19 @@ function specToRegions(specRegions) {
 }
 function parseProposalNode(raw) {
   const enc = Array.isArray(raw.enc) ? raw.enc.map((e) => typeof e === "string" ? { node: e, w: 1 } : { node: String(e.node), w: Number(e.w ?? 1) }) : [];
-  return {
+  const node = {
     name: String(raw.name ?? "").trim(),
     pre: Array.isArray(raw.pre) ? raw.pre.map(String) : [],
     opt: Boolean(raw.opt),
     note: typeof raw.note === "string" ? raw.note : "",
     enc
   };
+  if (raw.est !== void 0) {
+    const est = Number(raw.est);
+    if (Number.isFinite(est) && est > 0) node.est = Math.round(est);
+  }
+  if (raw.type === "practice") node.type = "practice";
+  return node;
 }
 function simulateOps(regions, graph, ops) {
   const sim = JSON.parse(JSON.stringify(regions));
@@ -11380,6 +11647,17 @@ import { mkdir as mkdir7, readFile as readFile8, writeFile as writeFile7 } from 
 function normAnswer(s) {
   return String(s).trim().replace(/\s+/g, "");
 }
+function numericOf(s) {
+  const t = normAnswer(s);
+  if (!t) return null;
+  const n = Number(t);
+  if (Number.isFinite(n)) return n;
+  const frac = t.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/);
+  if (frac && Number(frac[2]) !== 0) return Number(frac[1]) / Number(frac[2]);
+  const pct = t.match(/^(-?\d+(?:\.\d+)?)%$/);
+  if (pct) return Number(pct[1]) / 100;
+  return null;
+}
 function normChoice(s) {
   let t = normAnswer(s).toUpperCase();
   for (const pre of ["\u9009\u9879", "\u7B54\u6848", "\u9009"]) {
@@ -11409,6 +11687,44 @@ function evaluateAllo(q, response) {
     case "reflection": {
       const s = typeof response === "string" ? response.trim() : "";
       if (!s) throw new Error("reflection \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      correct = true;
+      break;
+    }
+    case "multi_choice": {
+      const s = typeof response === "string" ? response : "";
+      if (!normAnswer(s)) throw new Error("multi_choice \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      const picked = new Set(s.split(/[,，]/).map(normChoice).filter(Boolean));
+      const expected = new Set((Array.isArray(q.answer) ? q.answer : []).map(normChoice));
+      correct = picked.size === expected.size && [...picked].every((x) => expected.has(x));
+      break;
+    }
+    case "numeric": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("numeric \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      const nu = numericOf(s);
+      const ne = numericOf(String(q.answer));
+      correct = nu !== null && ne !== null && Math.abs(nu - ne) <= (q.tol ?? 0);
+      break;
+    }
+    case "ordering": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("ordering \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      const seq = s.split(/\n/).map(normAnswer).filter(Boolean);
+      const expected = (Array.isArray(q.answer) ? q.answer : []).map(normAnswer);
+      correct = seq.length === expected.length && seq.every((x, i) => x === expected[i]);
+      break;
+    }
+    case "matching": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("matching \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
+      const seq = s.split(/\n/).map(normAnswer);
+      const expected = (Array.isArray(q.answer) ? q.answer : []).map(normAnswer);
+      correct = seq.length === expected.length && seq.every((x, i) => x === expected[i]);
+      break;
+    }
+    case "open_question": {
+      const s = typeof response === "string" ? response.trim() : "";
+      if (!s) throw new Error("open_question \u4F5C\u7B54\u4E0D\u80FD\u4E3A\u7A7A");
       correct = true;
       break;
     }
@@ -11447,6 +11763,32 @@ function parseReflectionGrading(raw) {
   }
   return { score: Math.min(1, Math.max(0, doc.score)), feedback: doc.feedback };
 }
+var OPEN_QUESTION_GRADING_SYSTEM = `You are a strict but constructive examiner grading a learner's open-ended answer that applies an entire lesson's content.
+
+Score the answer from 0 to 10 (6 is passing):
+- Coverage: does it apply the lesson's core concepts across sections?
+- Correctness: are the applied concepts used accurately?
+- Depth: does it show integrated understanding rather than surface recall?
+
+Reply with ONLY one JSON object matching this shape:
+{
+  "score": 7,
+  "feedback": "markdown text"
+}
+Rules:
+- score must be an integer between 0 and 10.
+- feedback must be Markdown with two mandatory parts: (1) \u9010\u70B9\u6279\u6539 \u2014 go through the learner's answer point by point, marking what is right and what is wrong or missing; (2) \u6539\u8FDB\u5EFA\u8BAE \u2014 concrete, actionable suggestions to reach full marks.
+- Write the feedback in the same language as the learner's answer.
+- Output JSON only, without Markdown fences or commentary.`;
+function parseOpenGrading(raw) {
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("unparseable open-question grading reply");
+  const doc = JSON.parse(m[0].replace(/,\s*([}\]])/g, "$1"));
+  if (typeof doc.score !== "number" || typeof doc.feedback !== "string") {
+    throw new Error("open-question grading reply missing score/feedback");
+  }
+  return { score: Math.min(10, Math.max(0, Math.round(doc.score))), feedback: doc.feedback };
+}
 function nextEma(current, score) {
   const prev = current && current > 0 ? current : null;
   const next = prev === null ? score : prev * 0.7 + score * 0.3;
@@ -11463,7 +11805,17 @@ function applyPracticeEvidence(fm, score) {
 
 // src/engine/question-bank.ts
 init_paths();
-var KINDS = ["single_choice", "true_false", "fill_in_blank", "reflection"];
+var KINDS = [
+  "single_choice",
+  "true_false",
+  "fill_in_blank",
+  "reflection",
+  "multi_choice",
+  "numeric",
+  "ordering",
+  "matching",
+  "open_question"
+];
 function validateBank(doc, expectedNode) {
   const errors = [];
   if (typeof doc !== "object" || doc === null) return { errors: ["(\u9876\u5C42): \u5FC5\u987B\u662F\u6620\u5C04"] };
@@ -11513,17 +11865,56 @@ function validateBank(doc, expectedNode) {
           errors.push(`questions.${n}: reflection \u7684 answer \u5FC5\u987B\u662F\u8BC4\u5206\u8981\u70B9\u6587\u672C`);
           return;
         }
+      } else if (kind === "multi_choice") {
+        const options = Array.isArray(e.options) ? e.options.map(String) : [];
+        const letters = options.map((_, j) => String.fromCharCode(65 + j));
+        const picks = Array.isArray(answer) ? answer.map((a) => String(a).trim()) : [];
+        if (options.length < 2 || !picks.length || picks.some((p) => !letters.includes(normChoice(p)))) {
+          errors.push(`questions.${n}: multi_choice \u9700\u8981 options\uFF08\u22652\uFF09\u4E14 answer \u4E3A\u5408\u6CD5\u9009\u9879\u5B57\u6BCD\u6570\u7EC4`);
+          return;
+        }
+      } else if (kind === "numeric") {
+        if (numericOf(String(answer)) === null) {
+          errors.push(`questions.${n}: numeric \u7684 answer \u5FC5\u987B\u662F\u6570\u503C\uFF08\u652F\u6301\u5C0F\u6570/\u5206\u6570/\u767E\u5206\u6570\uFF09`);
+          return;
+        }
+        if (e.tol !== void 0 && !(Number(e.tol) > 0)) {
+          errors.push(`questions.${n}: numeric \u7684 tol \u5FC5\u987B\u662F\u6B63\u6570`);
+          return;
+        }
+      } else if (kind === "ordering") {
+        const options = Array.isArray(e.options) ? e.options.map(String) : [];
+        const seq = Array.isArray(answer) ? answer.map(String) : [];
+        const same = options.length >= 2 && seq.length === options.length && [...seq].sort().join("\0") === [...options].sort().join("\0");
+        if (!same) {
+          errors.push(`questions.${n}: ordering \u9700\u8981 options\uFF08\u22652 \u4E71\u5E8F\u9879\uFF09\u4E14 answer \u4E3A\u540C\u4E00\u7EC4\u9879\u7684\u6B63\u786E\u987A\u5E8F\u6392\u5217`);
+          return;
+        }
+      } else if (kind === "matching") {
+        const options = Array.isArray(e.options) ? e.options.map(String) : [];
+        const pairs = Array.isArray(answer) ? answer.map(String) : [];
+        if (options.length < 2 || pairs.length !== options.length || pairs.some((p) => !p.trim())) {
+          errors.push(`questions.${n}: matching \u9700\u8981 options\uFF08\u5DE6\u5217 \u22652\uFF09\u4E14 answer \u4E3A\u4E0E\u5DE6\u5217\u4E00\u4E00\u5BF9\u5E94\u7684\u53F3\u5217\u6587\u672C\u6570\u7EC4`);
+          return;
+        }
+      } else if (kind === "open_question") {
+        if (answer !== void 0 && answer !== null && typeof answer !== "string") {
+          errors.push(`questions.${n}: open_question \u7684 answer \u5FC5\u987B\u662F\u53C2\u8003\u8981\u70B9\u6587\u672C\uFF08\u53EF\u7701\u7565\uFF09`);
+          return;
+        }
       }
       questions.push({
         id,
         kind,
         q: String(e.q).trim(),
-        answer: Array.isArray(answer) ? answer.map(String) : answer,
+        answer: kind === "numeric" ? String(answer) : Array.isArray(answer) ? answer.map(String) : answer,
         ...Array.isArray(e.options) && e.options.length ? { options: e.options.map(String) } : {},
         ...typeof e.explanation === "string" && e.explanation ? { explanation: e.explanation } : {},
         ...e.difficulty !== void 0 && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {},
         ...Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {},
         ...Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {},
+        ...kind === "numeric" && Number(e.tol) > 0 ? { tol: Number(e.tol) } : {},
+        ...typeof e.section === "string" && e.section.trim() ? { section: e.section.trim() } : {},
         ...e.archived === true ? { archived: true } : {},
         // 调度/统计块由作答侧写入，schema 只透传不做内部校验
         ...e.fsrs && typeof e.fsrs === "object" ? { fsrs: e.fsrs } : {},
@@ -11746,17 +12137,18 @@ var Sessions = class _Sessions {
     return vp ? `[[${vp}|${n}]]` : n;
   }
   // ---- status ----
-  async statusJson(enabled, bankDueByCourse, today = todayStr()) {
+  async statusJson(enabled, statsByCourse, today = todayStr()) {
     const courses = [];
     for (const c of enabled) {
       const { graph, state } = await this.viewOf(c);
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
       const rValue = (n) => retrievability(sched, state[n], today);
       const st = courseStats(graph, state, rValue, today);
-      const bankDue = bankDueByCourse.get(c.name) ?? [];
+      const stats = statsByCourse.get(c.name) ?? [];
       const t = parseDay(today);
-      const overdueNodes = bankDue.filter((b) => (parseDay(b.due)?.getTime() ?? 0) < t.getTime());
-      const dueNodes = bankDue.filter((b) => (parseDay(b.due)?.getTime() ?? 0) === t.getTime());
+      const withDue = stats.filter((s) => s.due !== null);
+      const overdueNodes = withDue.filter((s) => (parseDay(s.due ?? "")?.getTime() ?? t.getTime()) < t.getTime());
+      const dueNodes = withDue.filter((s) => s.due === today);
       courses.push({
         id: c.id,
         name: c.name,
@@ -11772,7 +12164,7 @@ var Sessions = class _Sessions {
     return { date: today, courses };
   }
   // ---- 动态推荐 ----
-  async recommendEvents(enabled, bankDueByCourse, today, limit) {
+  async recommendEvents(enabled, statsByCourse, today, limit) {
     const events = [];
     const seen = /* @__PURE__ */ new Set();
     for (const c of enabled) {
@@ -11780,7 +12172,7 @@ var Sessions = class _Sessions {
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
       const rValue = (n) => retrievability(sched, state[n], today);
       const st = courseStats(graph, state, rValue, today);
-      const bankDue = bankDueByCourse.get(c.name) ?? [];
+      const stats = statsByCourse.get(c.name) ?? [];
       const t = parseDay(today);
       const add = (etype, node, score, why) => {
         if (seen.has(node)) return;
@@ -11795,24 +12187,27 @@ var Sessions = class _Sessions {
           path: this.notePath(c.root, graph, node)
         });
       };
-      for (const b of [...bankDue].sort((a, b2) => a.due.localeCompare(b2.due))) {
-        const d = parseDay(b.due);
+      for (const s of [...stats].sort((a, b) => (a.due ?? "").localeCompare(b.due ?? ""))) {
+        const d = parseDay(s.due ?? "");
         if (!d) continue;
         if (d.getTime() < t.getTime()) {
           const days = daysBetween(t, d);
           add(
             "overdue",
-            b.node,
-            60 + Math.min(days, 10) * 3 + b.count * 2,
-            `\u903E\u671F ${days} \u5929\uFF0C${b.count} \u9053\u9898\u5230\u671F`
+            s.node,
+            60 + Math.min(days, 10) * 3 + s.count * 2,
+            `\u903E\u671F ${days} \u5929\uFF0C${s.count} \u9053\u9898\u5230\u671F`
           );
         } else if (d.getTime() === t.getTime()) {
-          add("review", b.node, 55, `\u4ECA\u65E5 ${b.count} \u9053\u9898\u5230\u671F`);
+          add("review", s.node, 55, `\u4ECA\u65E5 ${s.count} \u9053\u9898\u5230\u671F`);
         }
       }
       for (const n of graph.names.filter((x) => effectiveStage(state, x) === "learning").sort()) {
         const r = state[n] ? rValue(n) : 0.9;
-        add("learning", n, 52 + (1 - r) * 10, `\u5B66\u5230\u4E00\u534A\uFF0C\u7EE7\u7EED\u5B8C\u6210\u5B83\uFF08\u4FDD\u6301\u7387\u7EA6 ${Math.round(r * 100)}%\uFF09`);
+        const stat = stats.find((s) => s.node === n);
+        const struggling = stat?.accuracy !== null && stat !== void 0 && stat.accuracy < 0.6;
+        const why = struggling ? `\u6B63\u786E\u7387\u4EC5 ${Math.round((stat?.accuracy ?? 0) * 100)}%\uFF0C\u5EFA\u8BAE\u5148\u590D\u4E60\u524D\u7F6E\u6982\u5FF5\u518D\u7EE7\u7EED` : `\u5B66\u5230\u4E00\u534A\uFF0C\u7EE7\u7EED\u5B8C\u6210\u5B83\uFF08\u4FDD\u6301\u7387\u7EA6 ${Math.round(r * 100)}%\uFF09`;
+        add("learning", n, 52 + (1 - r) * 10 + (struggling ? 6 : 0), why);
       }
       const lru = regionLru(graph, state);
       const lruBonus = new Map(lru.map((r0, i) => [r0, Math.max(0, 8 - i * 2)]));
@@ -11894,6 +12289,99 @@ var Sessions = class _Sessions {
 
 // src/engine/index.ts
 init_dates();
+init_store();
+
+// src/engine/xp.ts
+import { readFile as readFile9 } from "node:fs/promises";
+init_dates();
+init_store();
+function xpForAnswer(kind, difficulty, correct, elapsedS, scheduled) {
+  if (!correct && elapsedS !== null && elapsedS < XP_GUESS_SECONDS) return { xp: XP_GUESS_PENALTY, reason: "guess" };
+  if (!scheduled) return { xp: 0, reason: "repeat" };
+  if (!correct) return { xp: 0, reason: "wrong" };
+  const w = XP_BASE[kind] ?? 1;
+  return { xp: Math.max(1, Math.round(w * Math.max(1, difficulty))), reason: "correct" };
+}
+function nominalBudget(est, questions) {
+  if (est !== void 0 && est > 0) return est;
+  const sum = questions.reduce((s, q) => s + (XP_BASE[q.kind] ?? 1) * Math.max(1, q.difficulty ?? 1), 0);
+  return sum > 0 ? sum : XP_PER_NODE_DEFAULT;
+}
+function difficultyCalibration(questions) {
+  let weighted = 0;
+  let weights = 0;
+  for (const q of questions) {
+    const w = (XP_BASE[q.kind] ?? 1) * Math.max(1, q.difficulty ?? 1);
+    weights += w;
+    const d = q.fsrs && typeof q.fsrs.difficulty === "number" && q.fsrs.difficulty > 0 ? q.fsrs.difficulty / FSRS_DIFFICULTY_MID : 1;
+    weighted += w * d;
+  }
+  if (!weights) return 1;
+  return Math.min(3, Math.max(0.5, weighted / weights));
+}
+async function readDailyGoal(paths) {
+  try {
+    const doc = JSON.parse(await readFile9(paths.learnhubConfigPath, "utf8"));
+    return clampGoal(doc.daily_xp_goal ?? DAILY_XP_GOAL_DEFAULT);
+  } catch {
+    return DAILY_XP_GOAL_DEFAULT;
+  }
+}
+async function writeDailyGoal(paths, goal) {
+  const clamped = clampGoal(goal);
+  let prev = {};
+  try {
+    prev = JSON.parse(await readFile9(paths.learnhubConfigPath, "utf8"));
+  } catch {
+  }
+  await atomicWrite(paths.learnhubConfigPath, JSON.stringify({ ...prev, daily_xp_goal: clamped }, null, 1) + "\n");
+  return clamped;
+}
+function clampGoal(n) {
+  return Number.isFinite(n) ? Math.min(1e3, Math.max(5, Math.round(n))) : DAILY_XP_GOAL_DEFAULT;
+}
+function recXp(r) {
+  return r.xp ?? 0;
+}
+function sumXp(practice, journal, day) {
+  const hit = (ts) => !day || ts.slice(0, 10) === day;
+  return practice.filter((r) => hit(r.ts)).reduce((s, r) => s + recXp(r), 0) + journal.filter((r) => hit(r.ts)).reduce((s, r) => s + recXp(r), 0);
+}
+function streakFrom(byDay, today) {
+  const cursor = parseDay(today);
+  if (!cursor) return 0;
+  if (!(byDay[fmtDay(cursor)]?.total > 0)) cursor.setUTCDate(cursor.getUTCDate() - 1);
+  let streak = 0;
+  while (byDay[fmtDay(cursor)]?.total > 0) {
+    streak++;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  return streak;
+}
+
+// src/engine/index.ts
+function shuffled(items) {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+function revealAnswer(q) {
+  switch (q.kind) {
+    case "multi_choice":
+      return Array.isArray(q.answer) ? q.answer.join("") : String(q.answer);
+    case "ordering":
+      return Array.isArray(q.answer) ? q.answer.join(" \u2192 ") : String(q.answer);
+    case "matching":
+      return Array.isArray(q.answer) && q.options?.length ? q.options.map((o, i) => `${o} \u2192 ${q.answer[i] ?? "?"}`).join("\uFF1B") : Array.isArray(q.answer) ? q.answer.join(" / ") : String(q.answer);
+    case "fill_in_blank":
+      return Array.isArray(q.answer) ? q.answer.join(" / ") : String(q.answer);
+    default:
+      return String(q.answer);
+  }
+}
 var LearnhubEngine = class {
   paths;
   registry;
@@ -11955,23 +12443,25 @@ var LearnhubEngine = class {
   }
   // ---- status / recommend ----
   async statusJson() {
-    const bankDue = await this.bankDueAll();
-    return this.sessions.statusJson(await this.enabledCourses(), bankDue);
+    const stats = await this.bankSnapshot();
+    return this.sessions.statusJson(await this.enabledCourses(), stats);
   }
   async recommend(limit = 5) {
-    const bankDue = await this.bankDueAll();
-    const events = await this.sessions.recommendEvents(await this.enabledCourses(), bankDue, todayStr(), limit);
+    const stats = await this.bankSnapshot();
+    const events = await this.sessions.recommendEvents(await this.enabledCourses(), stats, todayStr(), limit);
     return { date: todayStr(), events };
   }
-  /** 全部启用课程的题库到期聚合：node 级最小题目 due（复习队列的数据源）。 */
-  async bankDueAll() {
+  /** 全部启用课程的题库聚合（一次遍历）：每节点 due/count/accuracy/attempts。
+   * 复习队列（due/count）与 struggle 提示（accuracy）共用；未做题节点也入表
+   * （accuracy=null），供推荐流判定 struggle 与面板通用轮组装。 */
+  async bankSnapshot() {
     const out = /* @__PURE__ */ new Map();
     const today = todayStr();
     for (const c of await this.enabledCourses()) {
       const items = [];
       let files = [];
       try {
-        files = await readdir3(this.paths.bankDir(c.root));
+        files = await readdir4(this.paths.bankDir(c.root));
       } catch {
         out.set(c.name, items);
         continue;
@@ -11979,8 +12469,23 @@ var LearnhubEngine = class {
       for (const f of files.filter((f2) => f2.endsWith(".yaml"))) {
         const node = f.replace(/\.yaml$/, "");
         const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
-        const dues = bank.questions.filter((q) => !q.archived && q.fsrs?.reps && q.fsrs.due <= today).map((q) => q.fsrs.due);
-        if (dues.length) items.push({ node, due: dues.sort()[0], count: dues.length });
+        const qs = bank.questions.filter((q) => !q.archived);
+        if (!qs.length) continue;
+        let attempts = 0;
+        let correct = 0;
+        const dues = [];
+        for (const q of qs) {
+          attempts += q.stats?.attempts ?? 0;
+          correct += q.stats?.correct ?? 0;
+          if (q.fsrs?.reps && q.fsrs.due <= today) dues.push(q.fsrs.due);
+        }
+        items.push({
+          node,
+          due: dues.sort()[0] ?? null,
+          count: dues.length,
+          accuracy: attempts ? Math.round(correct / attempts * 100) / 100 : null,
+          attempts
+        });
       }
       out.set(c.name, items);
     }
@@ -12054,20 +12559,51 @@ ${lines.join("\n")}` };
   async loadPrompt(kind) {
     return this.content.loadPrompt(kind);
   }
+  /** 可用提示词类型（内置 + 自建变体）。 */
+  async promptKinds() {
+    return this.content.promptKinds();
+  }
+  /** 节点内容版本（frontmatter content.version；面板增量刷新依据）。 */
+  async contentVersion(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { state } = await this.loadView(c);
+    return state[node]?.content.version ?? 0;
+  }
+  /** 对现有课程笔记跑质检门（agent 手改正文后的校验入口；只读，不落盘不改状态）。 */
+  async contentCheck(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[check] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    const [, regionName] = graph.blockOf[node];
+    const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node));
+    return this.content.gateReport(graph, c.root, node, body);
+  }
   /** 生成落盘门：gate_report → applyGeneration（version+1, draft）。
-   * 节点笔记不存在时先建骨架（allo on-demand 语义：大纲即时、正文按需落盘）。 */
+   * 节点笔记不存在时先建骨架（allo on-demand 语义：大纲即时、正文按需落盘）。
+   * learnhub-interactive 标记块先拆出 HTML 落盘为交互件文件，再以引用块进质检门——
+   * 门禁检查「interactive 引用文件存在」时文件必须已就位。 */
   async contentApply(courseKey, node, body) {
     const c = await this.registry.resolve(courseKey);
     const { graph, state } = await this.loadView(c);
     if (!graph.nset.has(node)) throw new Error(`[apply] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
     if (!state[node]) await this.ensureNote(c.root, graph, node);
-    const gate = await this.content.gateReport(graph, c.root, node, body);
+    const split = Content.extractInteractive(body, c.root);
+    if (split.invalid.length) {
+      throw new Error(`[apply] learnhub-interactive \u6807\u8BB0\u5757\u8DEF\u5F84\u975E\u6CD5\uFF08\u53EA\u5141\u8BB8\u8BFE\u7A0B\u6839\u5185\u76F8\u5BF9 .html \u8DEF\u5F84\uFF0C\u65E0 ..\uFF09: ${split.invalid.join("\u3001")}`);
+    }
+    const courseRoot = this.paths.courseRoot(c.root);
+    for (const f of split.files) {
+      const target = `${courseRoot}/${f.rel}`;
+      await mkdir8(target.replace(/[/\\][^/\\]+$/, ""), { recursive: true });
+      await writeFile8(target, f.html, "utf8");
+    }
+    const gate = await this.content.gateReport(graph, c.root, node, split.body);
     if (!gate.passed) {
       throw new Error(`[apply] \u8D28\u68C0\u95E8\u672A\u8FC7\uFF1A
 ${gate.findings.map((e) => `  \u2717 ${e}`).join("\n")}
 ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     }
-    const normalized = this.content.normalizePractice(body);
+    const normalized = this.content.normalizePractice(split.body);
     const version2 = await this.content.applyGeneration(
       c.root,
       graph,
@@ -12077,7 +12613,8 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
       (rec) => this.store.appendJournal({ ...rec, course: c.name })
     );
     await this.content.queueDone(c.root, node);
-    return { version: version2, message: `[apply] ${node} \u6B63\u6587 v${version2} \u843D\u76D8\uFF08status=draft\uFF0C\u5F85\u4EBA\u5BA1\uFF09` };
+    const interactiveNote = split.files.length ? `\uFF1B\u4EA4\u4E92\u4EF6 ${split.files.length} \u4E2A\u843D\u76D8 \u4EA4\u4E92/` : "";
+    return { version: version2, message: `[apply] ${node} \u6B63\u6587 v${version2} \u843D\u76D8\uFF08status=draft\uFF0C\u5F85\u4EBA\u5BA1\uFF09${interactiveNote}` };
   }
   async contentFeedback(courseKey, node) {
     const c = await this.registry.resolve(courseKey);
@@ -12121,7 +12658,7 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     const p = input.replace(/\\/g, "/");
     const rel = p.startsWith(`${vaultRoot}/`) ? p.slice(vaultRoot.length + 1) : p.replace(/^\/+/, "");
     const abs = `${vaultRoot}/${rel}`;
-    const raw = await readFile9(abs, "utf8");
+    const raw = await readFile10(abs, "utf8");
     const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const node = m ? (m[1].match(/^node:\s*(.+)$/m)?.[1] ?? "").trim() : "";
     if (!node) throw new Error(`${rel} \u7684 frontmatter \u7F3A\u5C11 node \u5B57\u6BB5\uFF0C\u4E0D\u662F\u8BFE\u7A0B\u6587\u4EF6\u3002`);
@@ -12134,7 +12671,7 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
   }
   /** 提取笔记「内容反馈」区正文；仅占位符或为空返回 null。 */
   async feedbackBody(absPath) {
-    const raw = await readFile9(absPath, "utf8");
+    const raw = await readFile10(absPath, "utf8");
     const sec = raw.match(/## 内容反馈\n([\s\S]*?)(?=\n## |<!-- enc_candidates|$)/);
     const body = (sec?.[1] ?? "").replace(/在此写下你对本课内容的问题与建议.*$/m, "").trim();
     return body || null;
@@ -12188,7 +12725,9 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
         q: q.q,
         no: i + 1,
         difficulty: q.difficulty ?? 1,
+        section: q.section ?? null,
         ...q.options?.length ? { options: q.options } : {},
+        ...q.kind === "matching" && Array.isArray(q.answer) ? { pairOptions: shuffled([...new Set(q.answer)]) } : {},
         hasExplanation: Boolean(q.explanation),
         due: q.fsrs?.reps ? q.fsrs.due : null,
         attempts: q.stats?.attempts ?? 0,
@@ -12202,8 +12741,9 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     return this.bank.save(this.paths.courseRoot(c.root), yamlText, node);
   }
   /** allo 作答流：答题 → 自动判卷（reflection 走 AI）→ practice 流水 + 计数/EMA。
-   * 调度不在此触碰（D15：评分仍经工作单 settle / grade 通道）。 */
-  async questionAnswer(llmComplete2, courseKey, node, qid, answer) {
+   * 调度不在此触碰（D15：评分仍经工作单 settle / grade 通道）。
+   * elapsedS = 前端计时（题目渲染到提交的秒数）：记入流水并用于乱猜判定。 */
+  async questionAnswer(llmComplete2, courseKey, node, qid, answer, elapsedS) {
     const c = await this.registry.resolve(courseKey);
     const { graph } = await this.loadView(c);
     if (!graph.nset.has(node)) throw new Error(`[question] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
@@ -12213,21 +12753,27 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     const q = bank.questions[idx];
     let score = 0;
     let feedback = "";
-    if (q.kind === "reflection") {
-      const raw = await llmComplete2(
-        `Exercise prompt:
+    if (q.kind === "reflection" || q.kind === "open_question") {
+      const isOpen = q.kind === "open_question";
+      const prompt = isOpen ? `Lesson question (\u7EFC\u5408\u5E94\u7528):
+${q.q}
+
+Learner's answer:
+${answer}` + (String(q.answer).trim() ? `
+
+Reference points (\u53C2\u8003\u8981\u70B9):
+${String(q.answer)}` : "") : `Exercise prompt:
 ${q.q}
 
 Learner's answer:
 ${answer}
 
 Grading rubric (\u8BC4\u5206\u8981\u70B9):
-${String(q.answer)}`,
-        REFLECTION_GRADING_SYSTEM
-      );
+${String(q.answer)}`;
+      const raw = await llmComplete2(prompt, isOpen ? OPEN_QUESTION_GRADING_SYSTEM : REFLECTION_GRADING_SYSTEM);
       try {
-        const v = parseReflectionGrading(raw);
-        score = v.score;
+        const v = isOpen ? parseOpenGrading(raw) : parseReflectionGrading(raw);
+        score = isOpen ? v.score / 10 : v.score;
         feedback = v.feedback;
       } catch {
         score = answer.trim() ? 0.5 : 0;
@@ -12239,6 +12785,10 @@ ${String(q.answer)}`,
       feedback = r.feedback;
     }
     const correct = score >= PASS_SCORE;
+    const today = todayStr();
+    const guessed = !correct && elapsedS !== null && elapsedS < XP_GUESS_SECONDS;
+    const repeated = q.stats?.last === today && Boolean(q.fsrs?.reps) || guessed;
+    const settle = xpForAnswer(q.kind, q.difficulty ?? 1, correct, elapsedS ?? null, !repeated);
     await this.store.appendPractice({
       course: c.name,
       node,
@@ -12247,7 +12797,9 @@ ${String(q.answer)}`,
       correct,
       judge: q.kind,
       qid,
-      feedback: feedback || void 0
+      feedback: feedback || void 0,
+      elapsed_s: elapsedS ?? void 0,
+      xp: settle.xp
     });
     const [, regionName] = graph.blockOf[node];
     const path = this.paths.courseNotePath(c.root, regionName, node);
@@ -12262,10 +12814,9 @@ ${String(q.answer)}`,
         await this.content.onStageChange(c.root, graph, stateNow, node, next.stage);
       }
     }
-    const today = todayStr();
     let fs;
-    if (q.stats?.last === today && q.fsrs?.reps) {
-      fs = q.fsrs;
+    if (guessed || repeated && q.fsrs) {
+      fs = q.fsrs ?? null;
     } else {
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root));
       fs = applyRatingBlock(q.fsrs ?? null, correct ? 3 : 1, today, sched).fs;
@@ -12282,13 +12833,16 @@ ${String(q.answer)}`,
       score: Math.round(score * 100),
       feedback,
       explanation: q.explanation ?? "",
-      // 错题公布答案（allo answer_review 语义；reflection 的 rubric 也回显供对照）
-      answer: q.kind === "true_false" ? q.answer : q.kind === "single_choice" ? q.answer : q.kind === "fill_in_blank" ? Array.isArray(q.answer) ? q.answer.join(" / ") : q.answer : String(q.answer),
+      // 错题公布答案（allo answer_review 语义；reflection 的 rubric 与开放题的参考要点也回显供对照）
+      answer: revealAnswer(q),
       kind: q.kind,
       due: fs.due,
       mastery,
       // 本次作答是否推进了该题 FSRS 调度（每题每天至多一次）
-      scheduled: fs !== q.fsrs
+      scheduled: fs !== q.fsrs,
+      // XP 时间账本：本次作答的结算结果
+      xp: settle.xp,
+      xp_reason: settle.reason
     };
   }
   /** 节点掌握度 = 该节点全部题目的作答正确率汇总（Σcorrect/Σattempts；无作答 → 0）。 */
@@ -12319,19 +12873,43 @@ ${String(q.answer)}`,
     if (fm) await saveNote(path, { ...fm, stage }, body);
     return { course: c.name, node, stage };
   }
-  /** 完成确认：本轮内容已学——全部未归档题目纳入复习循环（已作答的按各自 FSRS
-   * 调度到期复习，没作答的初始化为明天起刷），节点 stage→review。节点 frontmatter
-   * 同步写一份「聚合代表」fsrs（全部题里到期最早的那张卡）：审计 E5 要求 review
-   * 有 fsrs，且 R_gate 的可提取性仍从节点状态读。 */
-  async nodeComplete(courseKey, node) {
+  /** 完成确认（Math Academy 语义的 lesson 通过判定）：
+   * 正确率（题库 stats 聚合）< 及格线且作答次数足够时默认拒绝——不推进 stage、
+   * 不初始化复习卡，返回 accepted=false 供前端引导复习（force=true 旁路）。
+   * 通过时：全部未归档题目纳入复习循环（已作答的按各自 FSRS 调度到期复习，
+   * 没作答的初始化为明天起刷），节点 stage→review；全部做过且全对 → 满分
+   * bonus XP（journal 流水）。节点 frontmatter 同步写一份「聚合代表」fsrs
+   * （全部题里到期最早的那张卡）：审计 E5 要求 review 有 fsrs，且 R_gate 的
+   * 可提取性仍从节点状态读。 */
+  async nodeComplete(courseKey, node, force = false) {
     const c = await this.registry.resolve(courseKey);
     const { graph, state } = await this.loadView(c);
     if (!graph.nset.has(node)) throw new Error(`[complete] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
     if (!state[node]) await this.ensureNote(c.root, graph, node);
     const courseRoot = this.paths.courseRoot(c.root);
+    const bank = await this.bank.load(courseRoot, node);
+    let attempts = 0;
+    let correct = 0;
+    for (const q of bank.questions) {
+      if (q.archived) continue;
+      attempts += q.stats?.attempts ?? 0;
+      correct += q.stats?.correct ?? 0;
+    }
+    const accuracy = attempts ? Math.round(correct / attempts * 100) / 100 : null;
+    if (state[node]?.stage === "mastered" || state[node]?.stage === "skipped") {
+      return { accepted: true, accuracy, course: c.name, node, stage: state[node].stage, initialized: 0, due: null };
+    }
+    if (!force && attempts >= 3 && accuracy !== null && accuracy < PASS_SCORE) {
+      return {
+        accepted: false,
+        accuracy,
+        course: c.name,
+        node,
+        reason: `\u6B63\u786E\u7387 ${Math.round(accuracy * 100)}% \u4F4E\u4E8E\u53CA\u683C\u7EBF\uFF08${PASS_SCORE}\uFF09\uFF0C\u5EFA\u8BAE\u660E\u5929\u518D\u6765\u6216\u5148\u590D\u4E60\u524D\u7F6E\u6982\u5FF5\u3002`
+      };
+    }
     const sched = await getScheduler(this.paths, courseRoot);
     const today = todayStr();
-    const bank = await this.bank.load(courseRoot, node);
     let initialized = 0;
     let due = null;
     let repCard = null;
@@ -12353,8 +12931,16 @@ ${String(q.answer)}`,
         repCard = fs;
       }
     }
-    if (state[node]?.stage === "mastered" || state[node]?.stage === "skipped") {
-      return { course: c.name, node, stage: state[node].stage, initialized, due };
+    if (attempts > 0 && correct === attempts) {
+      await this.store.appendJournal({
+        course: c.name,
+        node,
+        rating: null,
+        kind: "xp_bonus",
+        elapsed_days: 0,
+        xp: XP_PERFECT_BONUS,
+        detail: `\u6EE1\u5206\u5B8C\u6210 +${XP_PERFECT_BONUS} XP`
+      });
     }
     const [, regionName] = graph.blockOf[node];
     const path = this.paths.courseNotePath(c.root, regionName, node);
@@ -12367,8 +12953,118 @@ ${String(q.answer)}`,
       await saveNote(path, next, body);
       const { state: stateNow } = await this.loadView(c);
       await this.content.onStageChange(c.root, graph, stateNow, node, "review");
+      const activeQs = bank.questions.filter((q) => !q.archived);
+      const budget = Math.round(nominalBudget(graph.estOf[node], activeQs) * difficultyCalibration(activeQs));
+      let earned = 0;
+      for (const rec of await this.store.practiceAll()) {
+        if (rec.course === c.name && rec.node === node) earned += rec.xp ?? 0;
+      }
+      for (const rec of await this.store.journalTail(c.name, Number.MAX_SAFE_INTEGER)) {
+        if (rec.node === node) earned += rec.xp ?? 0;
+      }
+      const delta = budget - earned;
+      if (delta !== 0) {
+        await this.store.appendJournal({
+          course: c.name,
+          node,
+          rating: null,
+          kind: "xp_settle",
+          elapsed_days: 0,
+          xp: delta,
+          detail: `XP \u9884\u7B97\u5BF9\u8D26\uFF1AN\u2080=${nominalBudget(graph.estOf[node], activeQs)} \xD7 k=${difficultyCalibration(activeQs).toFixed(2)} = ${budget}\uFF0C\u8FC7\u7A0B\u51C0 ${earned}`
+        });
+      }
     }
-    return { course: c.name, node, stage: "review", initialized, due };
+    return { accepted: true, accuracy, course: c.name, node, stage: "review", initialized, due };
+  }
+  // ---- XP 时间账本（Math Academy 语义：1 XP ≈ 1 分钟有效专注） ----
+  /** XP 视图：今日 XP / streak / 每日目标 / 每课程 ETA。
+   * ETA 预算制：剩余工作量 = Σ(未完成节点 N₀×k)——est 内容定价 × FSRS 难度校准，
+   * 随作答证据积累自动校准；days = 剩余预算 ÷ 每日目标。 */
+  async xpStatus() {
+    const today = todayStr();
+    const [practice, journal, activity, goal] = await Promise.all([
+      this.store.practiceAll(),
+      this.store.journalTail(null, Number.MAX_SAFE_INTEGER),
+      this.store.activityCounts(),
+      readDailyGoal(this.paths)
+    ]);
+    const eta = [];
+    for (const c of await this.enabledCourses()) {
+      const { graph, state } = await this.loadView(c);
+      const counts = { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0, skipped: 0 };
+      for (const n of graph.names) counts[effectiveStage(state, n)]++;
+      const remaining = counts.unseen + counts.ready + counts.learning;
+      const done = counts.review + counts.mastered + counts.skipped;
+      let remainingXp = 0;
+      for (const n of graph.names) {
+        const st = effectiveStage(state, n);
+        if (st !== "unseen" && st !== "ready" && st !== "learning") continue;
+        const bankDoc = await this.bank.load(this.paths.courseRoot(c.root), n);
+        const activeQs = bankDoc.questions.filter((q) => !q.archived);
+        remainingXp += nominalBudget(graph.estOf[n], activeQs) * difficultyCalibration(activeQs);
+      }
+      const per = remaining ? Math.max(1, Math.round(remainingXp / remaining)) : 0;
+      eta.push({
+        course: c.name,
+        remaining,
+        done,
+        per_node: per,
+        days: remainingXp > 0 ? Math.ceil(remainingXp / Math.max(1, goal)) : 0
+      });
+    }
+    return { date: today, today_xp: sumXp(practice, journal, today), goal, streak: streakFrom(activity, today), eta };
+  }
+  /** 调整每日 XP 目标（state/learnhub.json）。 */
+  async setDailyGoal(goal) {
+    return { goal: await writeDailyGoal(this.paths, goal) };
+  }
+  // ---- 生成任务持久化（host 的 genJobs 内存态落盘出口；D14：文件读写收口 engine）----
+  /** 全量写入生成任务注册表（host 在每次任务状态变更时调用）。 */
+  async saveGenJobs(jobs) {
+    await atomicWrite(this.paths.genJobsPath, JSON.stringify(jobs, null, 1) + "\n");
+  }
+  /** 读入生成任务注册表；文件缺失/损坏返回空表。 */
+  async loadGenJobs() {
+    try {
+      const doc = JSON.parse(await readFile10(this.paths.genJobsPath, "utf8"));
+      return Array.isArray(doc) ? doc : [];
+    } catch {
+      return [];
+    }
+  }
+  /** 「与 AI 讨论本课」上下文包：节点元信息 + 正文 + 题库摘要 + 图位置（面板 → dsh 会话的首条消息原料）。 */
+  async discussionPack(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[discuss] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    const fm = state[node];
+    const mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
+    const lines = [];
+    lines.push(`# \u8BFE\u7A0B\u4E0A\u4E0B\u6587\uFF1A${c.name} / ${node}`);
+    lines.push(`- \u533A/\u5757\uFF1A${graph.blockOf[node][1]} \xB7 ${graph.blockOf[node][2]}\uFF1B\u6DF1\u5EA6 L${(graph.depth[node] ?? 0) + 1}\uFF1B\u9636\u6BB5\uFF1A${fm?.stage ?? "unknown"}\uFF1B\u638C\u63E1\u5EA6\uFF1A${Math.round(mastery * 100)}%`);
+    const note = graph.noteOf[node];
+    if (note) lines.push(`- note\uFF1A${note}`);
+    const [, regionName] = graph.blockOf[node];
+    try {
+      const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node));
+      const cleaned = body.replace(/^>\s*内容待生成。\s*$/m, "").trim();
+      lines.push("", "## \u8282\u70B9\u6B63\u6587", cleaned ? cleaned.slice(0, 6e3) : "\uFF08\u5C1A\u672A\u751F\u6210\u6B63\u6587\uFF09");
+    } catch {
+      lines.push("", "## \u8282\u70B9\u6B63\u6587", "\uFF08\u6B63\u6587\u6587\u4EF6\u7F3A\u5931\uFF09");
+    }
+    const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+    const qs = bank.questions.filter((q) => !q.archived);
+    if (qs.length) {
+      lines.push("", "## \u9898\u5E93\u6458\u8981", ...qs.map((q) => `- [${q.kind}] ${q.q.slice(0, 80)}`));
+    }
+    lines.push(
+      "",
+      "## \u56FE\u4F4D\u7F6E",
+      `- \u524D\u7F6E\uFF1A${graph.preOf[node].join("\u3001") || "\u65E0"}`,
+      `- \u540E\u7EE7\uFF1A${(graph.succ[node] ?? []).join("\u3001") || "\u65E0"}`
+    );
+    return lines.join("\n");
   }
   // ---- 学习面板扩展（题目管理/课程删除）----
   /** 全部题库条目（题目管理列表；不含答案，带到期与统计）。 */
@@ -12378,7 +13074,7 @@ ${String(q.answer)}`,
     for (const c of courses) {
       let files = [];
       try {
-        files = await readdir3(this.paths.bankDir(c.root));
+        files = await readdir4(this.paths.bankDir(c.root));
       } catch {
         continue;
       }
@@ -12397,7 +13093,8 @@ ${String(q.answer)}`,
             tags: q.tags ?? [],
             archived: q.archived === true,
             hasExplanation: Boolean(q.explanation),
-            ...q.options?.length ? { options: q.options } : {}
+            ...q.options?.length ? { options: q.options } : {},
+            ...q.kind === "matching" && Array.isArray(q.answer) ? { pairOptions: [...new Set(q.answer)] } : {}
           });
         });
       }
@@ -12500,6 +13197,10 @@ var name = "dsh-learnhub";
 var inject = ["tools", "webServer", "llm"];
 var llmCfg = { provider: "deepseek-official", model: "deepseek-v4-flash" };
 var genJobs = /* @__PURE__ */ new Map();
+function persistGenJobs() {
+  void engine.saveGenJobs([...genJobs.values()].map((j) => ({ ...j }))).catch(() => {
+  });
+}
 var VAULT = "";
 var CENTER_REL = "\u5B66\u4E60\u4E2D\u5FC3";
 var engine;
@@ -12593,17 +13294,19 @@ function stripFences(body) {
 async function generateQuiz(ctx, course, node, count) {
   return engine.questionGenerate(course, node, count, async (prompt) => stripFences(await llmComplete(ctx, prompt)));
 }
-async function generateContent(ctx, course, node) {
+async function generateContent(ctx, course, node, style) {
   const key = `${course}/${node}`;
   const existing = genJobs.get(key);
   if (existing && (existing.status === "running" || existing.status === "cancelling")) {
     throw new Error(`\u300C${node}\u300D\u6B63\u5728\u751F\u6210\u4E2D\uFF0C\u8BF7\u7A0D\u5019\u3002`);
   }
-  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running", phase: "content" };
+  const promptKind = style ? `\u8BFE\u7A0B\u751F\u6210-${style}` : "\u8BFE\u7A0B\u751F\u6210";
+  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running", phase: "content", ...style ? { style } : {} };
   genJobs.set(key, job);
+  persistGenJobs();
   try {
     const pack = await engine.contentPack(course, node);
-    const tpl = await engine.loadPrompt("\u8BFE\u7A0B\u751F\u6210");
+    const tpl = await engine.loadPrompt(promptKind);
     const body = stripFences(await llmComplete(ctx, `${tpl}
 
 ---
@@ -12613,6 +13316,7 @@ ${pack}`));
     const res = await engine.contentApply(course, node, body);
     job.phase = "quiz";
     job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u4E2D\u2026`;
+    persistGenJobs();
     try {
       const quiz = await generateQuiz(ctx, course, node, 6);
       job.status = "done";
@@ -12621,27 +13325,53 @@ ${pack}`));
       job.status = "done";
       job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u5931\u8D25\uFF08${quizErr instanceof Error ? quizErr.message : String(quizErr)}\uFF09\u2014\u2014\u53EF\u5728\u7EC3\u4E60\u9875\u5355\u72EC\u91CD\u8BD5`;
     }
+    persistGenJobs();
     return job.message;
   } catch (err) {
     job.status = job.status === "cancelling" ? "cancelled" : "failed";
     job.message = err instanceof Error ? err.message : String(err);
+    persistGenJobs();
     throw err;
   } finally {
     const keep = job.status === "failed" || job.status === "cancelled" ? 24 * 60 * 6e4 : 30 * 6e4;
     setTimeout(() => {
       const cur = genJobs.get(key);
       if (cur && cur.status !== "running" && cur.status !== "cancelling") genJobs.delete(key);
+      persistGenJobs();
     }, keep).unref();
   }
 }
-function generationStatus() {
-  return [...genJobs.entries()].map(([key, j]) => ({ key, ...j }));
+async function generationStatus() {
+  const out = [];
+  for (const [key, j] of genJobs.entries()) {
+    let contentVersion;
+    try {
+      contentVersion = await engine.contentVersion(j.course, j.node);
+    } catch {
+    }
+    out.push({ key, ...j, contentVersion });
+  }
+  return out;
 }
 function cancelGeneration(course, node) {
   const job = genJobs.get(`${course}/${node}`);
   if (!job) return { cancelled: false };
   if (job.status === "running") job.status = "cancelling";
   return { cancelled: true, status: job.status };
+}
+async function tutorChat(ctx, course, node, history) {
+  const pack = await engine.discussionPack(course, node);
+  const turns = history.map((h) => h).filter((h) => (h.role === "user" || h.role === "assistant") && typeof h.content === "string" && h.content.trim()).slice(-12);
+  if (!turns.length || turns[turns.length - 1].role !== "user") {
+    throw new Error("tutor \u5BF9\u8BDD\u5386\u53F2\u5FC5\u987B\u4EE5\u5B66\u4E60\u8005\u7684\u63D0\u95EE\u7ED3\u5C3E\u3002");
+  }
+  const transcript = turns.map((h) => `${h.role === "assistant" ? "[AI \u8001\u5E08]" : "[\u5B66\u4E60\u8005]"} ${h.content}`).join("\n\n");
+  const system = `\u4F60\u662F learnhub \u7684 AI \u8001\u5E08\uFF0C\u6B63\u5728\u8F85\u5BFC\u5B66\u4E60\u8005\u653B\u514B\u4E00\u4E2A\u8BFE\u7A0B\u8282\u70B9\u3002\u53EA\u4F9D\u636E\u4E0B\u9762\u7684\u8BFE\u7A0B\u4E0A\u4E0B\u6587\u4E0E\u672C\u8BFE\u8303\u56F4\u56DE\u7B54\uFF1B\u8D85\u51FA\u8303\u56F4\u7684\u8FFD\u95EE\u7ED9\u4E00\u53E5\u6982\u62EC\u5E76\u5EFA\u8BAE\u56DE\u5230\u8BFE\u7A0B\u4E3B\u7EBF\u3002\u56DE\u7B54\u7528 Markdown\uFF0C\u7B80\u6D01\u76F4\u63A5\uFF0C\u516C\u5F0F\u7528 KaTeX\uFF08$...$\uFF09\u3002
+
+${pack}`;
+  return llmComplete(ctx, `${transcript}
+
+\uFF08\u8BF7\u56DE\u7B54\u4E0A\u9762\u6700\u540E\u4E00\u6761\u5B66\u4E60\u8005\u7684\u63D0\u95EE\u3002\uFF09`, system);
 }
 function sendJson(res, code, body) {
   res.writeHead(code, {
@@ -12716,12 +13446,38 @@ async function handleApi(ctx, req, res) {
       if (!mime) throw new Error(`unsupported file type: ${ext || "(none)"}`);
       let buf;
       try {
-        buf = await readFile10(`${VAULT}/${rel}`);
+        buf = await readFile11(`${VAULT}/${rel}`);
       } catch {
         sendJson(res, 404, { error: `file not found: ${rel}` });
         return;
       }
       res.writeHead(200, { "content-type": mime, "cache-control": "public, max-age=3600" });
+      res.end(buf);
+      return;
+    }
+    if (req.method === "GET" && route === "/interactive") {
+      const p = url.searchParams.get("path");
+      if (!p) throw new Error("missing required field: path");
+      const rel = p.replace(/\\/g, "/").replace(/^\/+/, "");
+      if (rel.includes("..")) throw new Error("path traversal rejected");
+      if (!rel.startsWith(`${CENTER_REL}/`)) throw new Error("interactive \u5FC5\u987B\u4F4D\u4E8E\u5B66\u4E60\u4E2D\u5FC3\u5185");
+      const courseRoot = rel.slice(CENTER_REL.length + 1).split("/")[0];
+      if (!(await engine.enabledCourses()).some((c) => c.root === courseRoot)) {
+        throw new Error(`interactive \u4E0D\u5728\u4EFB\u4F55\u542F\u7528\u8BFE\u7A0B\u7684\u6839\u5185: ${courseRoot}`);
+      }
+      if (!rel.toLowerCase().endsWith(".html")) throw new Error("interactive \u53EA\u5141\u8BB8 .html");
+      let buf;
+      try {
+        buf = await readFile11(`${VAULT}/${rel}`);
+      } catch {
+        sendJson(res, 404, { error: `file not found: ${rel}` });
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:",
+        "cache-control": "no-store"
+      });
       res.end(buf);
       return;
     }
@@ -12750,8 +13506,23 @@ async function handleApi(ctx, req, res) {
       sendJson(res, 200, await apiRun("api/questions-all", () => engine.questionsAll(course)));
       return;
     }
+    if (req.method === "GET" && route === "/xp") {
+      sendJson(res, 200, await apiRun("api/xp", () => engine.xpStatus()));
+      return;
+    }
     if (req.method === "GET" && route === "/generate/status") {
       sendJson(res, 200, await apiRun("api/generate/status", () => generationStatus()));
+      return;
+    }
+    if (req.method === "GET" && route === "/prompts") {
+      sendJson(res, 200, await apiRun("api/prompts", () => engine.promptKinds()));
+      return;
+    }
+    if (req.method === "GET" && route === "/discuss-pack") {
+      const node = url.searchParams.get("node");
+      if (!node) throw new Error("missing required field: node");
+      const course = url.searchParams.get("course") ?? void 0;
+      sendJson(res, 200, await apiRun("api/discuss-pack", () => engine.discussionPack(course, node)));
       return;
     }
     if (req.method === "POST") {
@@ -12765,7 +13536,7 @@ async function handleApi(ctx, req, res) {
         return;
       }
       if (route === "/node/complete") {
-        sendJson(res, 200, await apiRun("api/node/complete", () => engine.nodeComplete(need(body, "course"), need(body, "node"))));
+        sendJson(res, 200, await apiRun("api/node/complete", () => engine.nodeComplete(need(body, "course"), need(body, "node"), body.force === true)));
         return;
       }
       if (route === "/feedback") {
@@ -12785,8 +13556,16 @@ async function handleApi(ctx, req, res) {
         return;
       }
       if (route === "/generate") {
+        const style = typeof body.style === "string" && body.style.trim() ? body.style.trim() : void 0;
         sendJson(res, 200, await apiRun("api/generate", async () => ({
-          message: await generateContent(ctx, need(body, "course"), need(body, "node"))
+          message: await generateContent(ctx, need(body, "course"), need(body, "node"), style)
+        })));
+        return;
+      }
+      if (route === "/tutor") {
+        const history = Array.isArray(body.messages) ? body.messages : [];
+        sendJson(res, 200, await apiRun("api/tutor", async () => ({
+          answer: await tutorChat(ctx, need(body, "course"), need(body, "node"), history)
         })));
         return;
       }
@@ -12809,7 +13588,8 @@ async function handleApi(ctx, req, res) {
           need(body, "course"),
           need(body, "node"),
           need(body, "qid"),
-          typeof body.answer === "string" ? body.answer : ""
+          typeof body.answer === "string" ? body.answer : "",
+          typeof body.elapsed_s === "number" && Number.isFinite(body.elapsed_s) ? body.elapsed_s : null
         )));
         return;
       }
@@ -12843,6 +13623,12 @@ async function handleApi(ctx, req, res) {
     }
     if (req.method === "PUT") {
       const body = await readJson(req);
+      if (route === "/daily-goal") {
+        const goal = Number(body.goal);
+        if (!Number.isFinite(goal)) throw new Error("missing required field: goal");
+        sendJson(res, 200, await apiRun("api/daily-goal", () => engine.setDailyGoal(goal)));
+        return;
+      }
       if (route === "/question-update") {
         const patch = typeof body.patch === "object" && body.patch !== null ? body.patch : {};
         sendJson(res, 200, await engine.questionUpdate(need(body, "course"), need(body, "node"), need(body, "qid"), patch));
@@ -12867,6 +13653,24 @@ function apply(ctx, config) {
   if (!existsSync7(center)) throw new Error(`[learnhub] \u5B66\u4E60\u4E2D\u5FC3\u76EE\u5F55\u4E0D\u5B58\u5728\uFF1A${center}`);
   VAULT = vault;
   engine = new LearnhubEngine({ vault, centerRel: CENTER_REL });
+  void engine.loadGenJobs().then((stale) => {
+    for (const raw of stale) {
+      const j = raw;
+      if (typeof j.course !== "string" || typeof j.node !== "string") continue;
+      const key = `${j.course}/${j.node}`;
+      const interrupted = j.status === "running" || j.status === "cancelling";
+      genJobs.set(key, {
+        course: j.course,
+        node: j.node,
+        startedAt: typeof j.startedAt === "string" ? j.startedAt : (/* @__PURE__ */ new Date()).toISOString(),
+        status: interrupted ? "failed" : j.status ?? "failed",
+        ...j.phase ? { phase: j.phase } : {},
+        message: interrupted ? "\u8FDB\u7A0B\u91CD\u542F\uFF0C\u4EFB\u52A1\u4E2D\u65AD\u2014\u2014\u53EF\u91CD\u8BD5" : typeof j.message === "string" ? j.message : void 0
+      });
+    }
+    persistGenJobs();
+    if (stale.length) console.log(`[learnhub] gen-jobs restored: ${stale.length} (interrupted marked failed)`);
+  });
   if (config?.provider) llmCfg.provider = config.provider;
   if (config?.model) llmCfg.model = config.model;
   const textOutput = {
@@ -12898,12 +13702,13 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_complete",
-    "Confirm a node has been learned this round: unanswered bank questions get their FSRS card initialized (due tomorrow) and the node stage moves to review, entering the review rotation.",
+    "Confirm a node has been learned this round. Accuracy below the passing line (0.6, with enough attempts) is rejected with accepted=false \u2014 review prerequisites or retry with force. On acceptance: unanswered bank questions get their FSRS card initialized (due tomorrow), the node stage moves to review, and a perfect-score completion earns bonus XP.",
     {
       course: { type: "string", required: true, description: "Course name" },
-      node: { type: "string", required: true, description: "Node name" }
+      node: { type: "string", required: true, description: "Node name" },
+      force: { type: "boolean", description: "true to bypass the accuracy gate" }
     },
-    (args) => run("learnhub_complete", async () => JSON.stringify(await engine.nodeComplete(args.course, args.node)))
+    (args) => run("learnhub_complete", async () => JSON.stringify(await engine.nodeComplete(args.course, args.node, args.force === true)))
   );
   tool(
     "learnhub_lesson",
@@ -12976,16 +13781,26 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_generate",
-    "Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics).",
+    "Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics). style selects a prompt variant (e.g. \u82CF\u683C\u62C9\u5E95/\u8D39\u66FC; built-ins listed by GET /prompts, custom ones live at state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210-<style>.md).",
     {
       course: { type: "string", required: true, description: "Course name" },
-      node: { type: "string", required: true, description: "Node name to generate" }
+      node: { type: "string", required: true, description: "Node name to generate" },
+      style: { type: "string", description: "Prompt style variant; omit for the default template" }
     },
-    (args) => run("learnhub_generate", () => generateContent(ctx, args.course, args.node))
+    (args) => run("learnhub_generate", () => generateContent(ctx, args.course, args.node, args.style))
+  );
+  tool(
+    "learnhub_content_check",
+    "Run the automated content quality gates (out-of-scope references, alias consistency, unregistered code-block languages, interactive file existence) on an existing course note without applying anything. Run this after manually editing a course note in the vault; fix every reported finding.",
+    {
+      course: { type: "string", required: true, description: "Course name" },
+      node: { type: "string", required: true, description: "Node name" }
+    },
+    (args) => run("learnhub_content_check", async () => JSON.stringify(await engine.contentCheck(args.course, args.node)))
   );
   tool(
     "learnhub_question_list",
-    "List the question-bank questions of a node as JSON (no answers). Bank files live at <\u8BFE\u7A0B\u6839>/\u9898\u5E93/<\u8282\u70B9>.yaml; kinds: single_choice / true_false / fill_in_blank / reflection.",
+    "List the question-bank questions of a node as JSON (no answers). Bank files live at <\u8BFE\u7A0B\u6839>/\u9898\u5E93/<\u8282\u70B9>.yaml; kinds: single_choice / true_false / fill_in_blank / multi_choice / numeric / ordering / matching / reflection / open_question.",
     {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name" }
@@ -12994,7 +13809,7 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_question_save",
-    "Save a question bank for a node: validates the Bank YAML (node/kind/q/answer per kind: single_choice needs options + letter answer; true_false boolean; fill_in_blank accepted answers; reflection grading rubric) then writes <\u8BFE\u7A0B\u6839>/\u9898\u5E93/<\u8282\u70B9>.yaml.",
+    "Save a question bank for a node: validates the Bank YAML (node/kind/q/answer per kind: single_choice needs options + letter answer; multi_choice options + letter array; true_false boolean; fill_in_blank accepted answers; numeric numeric answer + optional tol; ordering options + ordered answer items; matching left-column options + paired right-column answers; reflection grading rubric; open_question reference points) then writes <\u8BFE\u7A0B\u6839>/\u9898\u5E93/<\u8282\u70B9>.yaml.",
     {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name (must match the node field inside the YAML)" },
@@ -13009,7 +13824,7 @@ function apply(ctx, config) {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name" },
       qid: { type: "string", required: true, description: 'Question id inside the bank, e.g. "q1"' },
-      answer: { type: "string", required: true, description: "User answer (choice: letter; true_false: \u5BF9/\u9519; fill_in_blank: text; reflection: free text)" }
+      answer: { type: "string", required: true, description: "User answer (choice: letter, multi_choice: comma-joined letters; true_false: \u5BF9/\u9519; fill_in_blank: text; numeric: number; ordering/matching: newline-joined item texts in submitted order; reflection/open_question: free text)" }
     },
     (args) => run("learnhub_question_answer", async () => JSON.stringify(await engine.questionAnswer((prompt) => llmComplete(ctx, prompt), args.course, args.node, args.qid, args.answer)))
   );
@@ -13034,10 +13849,10 @@ function apply(ctx, config) {
           if (!(file + sep).startsWith(PAGE_DIST)) file = join3(PAGE_DIST, "index.html");
           let data;
           try {
-            data = await readFile10(file);
+            data = await readFile11(file);
           } catch {
             file = join3(PAGE_DIST, "index.html");
-            data = await readFile10(file);
+            data = await readFile11(file);
           }
           const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
           const mime = ASSET_MIME[ext] ?? "application/octet-stream";

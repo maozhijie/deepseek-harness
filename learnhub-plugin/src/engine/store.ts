@@ -32,6 +32,7 @@ export class Store {
       course: rec.course, node: rec.node, rating: rec.rating ?? null,
       kind: rec.kind, elapsed_days: Math.round(rec.elapsed_days ?? 0),
       session: rec.session ?? null, duration_s: rec.duration_s ?? null,
+      ...(rec.xp !== undefined ? { xp: rec.xp } : {}),
       ...(rec.detail ? { detail: rec.detail } : {}),
     }
     await mkdir(this.paths.centerStateDir, { recursive: true })
@@ -82,6 +83,8 @@ export class Store {
       judge: rec.judge,
       ...(rec.qid ? { qid: rec.qid } : {}),
       ...(rec.feedback ? { feedback: rec.feedback } : {}),
+      ...(rec.elapsed_s !== undefined ? { elapsed_s: Math.round(rec.elapsed_s * 10) / 10 } : {}),
+      ...(rec.xp !== undefined ? { xp: rec.xp } : {}),
     }
     await mkdir(this.paths.centerStateDir, { recursive: true })
     await appendFile(this.paths.practicePath, JSON.stringify(full) + '\n', 'utf8')

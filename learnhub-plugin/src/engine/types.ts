@@ -37,8 +37,16 @@ export interface Fm {
 /** 成分技能边（graphstore enc）。 */
 export interface EncEdge { node: string; w: number; note?: string }
 
-/** 图节点（graphstore.Node）。 */
-export interface GNode { name: string; pre: string[]; opt: boolean; note: string; enc: EncEdge[] }
+/** 图节点（graphstore.Node）。est = 标称学习时长（分钟，XP 内容定价）；type = practice 交互实践节点。 */
+export interface GNode {
+  name: string
+  pre: string[]
+  opt: boolean
+  note: string
+  enc: EncEdge[]
+  est?: number
+  type?: 'practice'
+}
 
 /** 图块（graphstore.Block）。 */
 export interface GBlock { name: string; nodes: GNode[] }
@@ -60,6 +68,8 @@ export interface JournalRec {
   session?: string | null
   duration_s?: number | null
   detail?: string
+  /** XP 账本条目（kind='xp_bonus' 等非作答入账；作答 XP 走 practice 流水）。 */
+  xp?: number
 }
 
 /** practice 作答流水条目（grading.record_attempt 同构；qid = 题库题目 id，可选）。 */
@@ -73,6 +83,10 @@ export interface PracticeRec {
   judge: string
   qid?: string
   feedback?: string
+  /** 本次作答耗时（秒；前端渲染题目到提交）。乱猜判定与 automaticity 分析用。 */
+  elapsed_s?: number
+  /** 本次作答结算的 XP（同日重复作答为 0；乱猜为负）。 */
+  xp?: number
 }
 
 /** 提案记录（db.proposals 行同构；产物 YAML 另存 state/proposals/）。 */

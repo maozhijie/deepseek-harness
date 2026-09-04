@@ -111,8 +111,9 @@ export function courseStats(graph: Graph, state: Record<string, Fm>, rValue: (n:
   }
 }
 
-/** 题库聚合的节点到期信息（facade 从题库文件汇总；节点 due = min(题目 due)）。 */
-export interface BankDueItem { node: string; due: string; count: number }
+/** 题库聚合的节点统计（facade 从题库文件汇总，一次遍历多处消费）：
+ * due/count 驱动复习队列；accuracy/attempts 驱动 struggle 提示。 */
+export interface NodeStat { node: string; due: string | null; count: number; accuracy: number | null; attempts: number }
 
 export class Sessions {
   /** 当前操作的课程根目录（notePath 解析用；跨课循环内由调用方重设）。 */
@@ -145,7 +146,7 @@ export class Sessions {
 
   async statusJson(
     enabled: Array<{ name: string; root: string; id?: string }>,
-    bankDueByCourse: Map<string, BankDueItem[]>,
+    statsByCourse: Map<string, NodeStat[]>,
     today = todayStr(),
   ): Promise<Record<string, unknown>> {
     const courses: Array<Record<string, unknown>> = []
@@ -154,10 +155,11 @@ export class Sessions {
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root))
       const rValue = (n: string) => retrievability(sched, state[n], today)
       const st = courseStats(graph, state, rValue, today)
-      const bankDue = bankDueByCourse.get(c.name) ?? []
+      const stats = statsByCourse.get(c.name) ?? []
       const t = parseDay(today)!
-      const overdueNodes = bankDue.filter(b => (parseDay(b.due)?.getTime() ?? 0) < t.getTime())
-      const dueNodes = bankDue.filter(b => (parseDay(b.due)?.getTime() ?? 0) === t.getTime())
+      const withDue = stats.filter(s => s.due !== null)
+      const overdueNodes = withDue.filter(s => (parseDay(s.due ?? '')?.getTime() ?? t.getTime()) < t.getTime())
+      const dueNodes = withDue.filter(s => s.due === today)
       courses.push({
         id: c.id, name: c.name,
         total: graph.names.length, counts: st.counts,
@@ -176,7 +178,7 @@ export class Sessions {
 
   async recommendEvents(
     enabled: Array<{ name: string; root: string }>,
-    bankDueByCourse: Map<string, BankDueItem[]>,
+    statsByCourse: Map<string, NodeStat[]>,
     today: string,
     limit: number,
   ): Promise<Array<Record<string, unknown>>> {
@@ -187,7 +189,7 @@ export class Sessions {
       const sched = await getScheduler(this.paths, this.paths.courseRoot(c.root))
       const rValue = (n: string) => retrievability(sched, state[n], today)
       const st = courseStats(graph, state, rValue, today)
-      const bankDue = bankDueByCourse.get(c.name) ?? []
+      const stats = statsByCourse.get(c.name) ?? []
       const t = parseDay(today)!
       const add = (etype: string, node: string, score: number, why: string) => {
         if (seen.has(node)) return
@@ -198,20 +200,26 @@ export class Sessions {
         })
       }
       // 复习/逾期：题库聚合（节点有到期题目）
-      for (const b of [...bankDue].sort((a, b) => a.due.localeCompare(b.due))) {
-        const d = parseDay(b.due)
+      for (const s of [...stats].sort((a, b) => (a.due ?? '').localeCompare(b.due ?? ''))) {
+        const d = parseDay(s.due ?? '')
         if (!d) continue
         if (d.getTime() < t.getTime()) {
           const days = daysBetween(t, d)
-          add('overdue', b.node, 60 + Math.min(days, 10) * 3 + b.count * 2,
-            `逾期 ${days} 天，${b.count} 道题到期`)
+          add('overdue', s.node, 60 + Math.min(days, 10) * 3 + s.count * 2,
+            `逾期 ${days} 天，${s.count} 道题到期`)
         } else if (d.getTime() === t.getTime()) {
-          add('review', b.node, 55, `今日 ${b.count} 道题到期`)
+          add('review', s.node, 55, `今日 ${s.count} 道题到期`)
         }
       }
+      // 学习中：保持率低或正确率低（struggle）时改写引导文案
       for (const n of graph.names.filter(x => effectiveStage(state, x) === 'learning').sort()) {
         const r = state[n] ? rValue(n) : 0.9
-        add('learning', n, 52 + (1 - r) * 10, `学到一半，继续完成它（保持率约 ${Math.round(r * 100)}%）`)
+        const stat = stats.find(s => s.node === n)
+        const struggling = stat?.accuracy !== null && stat !== undefined && stat.accuracy < 0.6
+        const why = struggling
+          ? `正确率仅 ${Math.round((stat?.accuracy ?? 0) * 100)}%，建议先复习前置概念再继续`
+          : `学到一半，继续完成它（保持率约 ${Math.round(r * 100)}%）`
+        add('learning', n, 52 + (1 - r) * 10 + (struggling ? 6 : 0), why)
       }
       // 新课：解锁后继数 + 分区轮转
       const lru = regionLru(graph, state)

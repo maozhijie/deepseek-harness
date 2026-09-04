@@ -45,7 +45,8 @@ export interface LearnhubConfig {
 const llmCfg = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
 
 /** 课程生成任务注册表（course/node 键）：面板「生成」页签的状态源，
- * 页面刷新后从这里恢复（allo 同语义：服务端注册表是事实来源）。 */
+ * 页面刷新后从这里恢复（allo 同语义：服务端注册表是事实来源）；
+ * 状态每次变更全量落盘 state/生成任务.json，host 重启后读入并把遗留 running 标为失败。 */
 interface GenJob {
   course: string
   node: string
@@ -54,8 +55,16 @@ interface GenJob {
   /** 组合管线的当前阶段：正文（content）→ 自动出题（quiz）。 */
   phase?: 'content' | 'quiz'
   message?: string
+  /** 课程生成提示词风格（缺省「课程生成」）。 */
+  style?: string
 }
 const genJobs = new Map<string, GenJob>()
+
+/** 注册表落盘（fire-and-forget；D14：文件 IO 收口 engine）。 */
+function persistGenJobs(): void {
+  void engine.saveGenJobs([...genJobs.values()].map(j => ({ ...j })))
+    .catch(() => { /* 落盘失败不影响内存态（下次变更重试） */ })
+}
 
 let VAULT = ''
 let CENTER_REL = '学习中心'
@@ -154,19 +163,21 @@ async function generateQuiz(ctx: Context, course: string, node: string, count: n
   return engine.questionGenerate(course, node, count, async prompt => stripFences(await llmComplete(ctx, prompt)))
 }
 
-/** 课程生成管线：上下文包 + 提示词 → ctx.llm → 质检门 apply（draft 落盘）→ 自动出题。
+/** 课程生成管线：上下文包 + 提示词（可指定风格变体）→ ctx.llm → 质检门 apply（draft 落盘）→ 自动出题。
  * 出题失败不回滚正文：任务标记 done 并在 message 里说明，练习页可单独重试出题。 */
-async function generateContent(ctx: Context, course: string, node: string): Promise<string> {
+async function generateContent(ctx: Context, course: string, node: string, style?: string): Promise<string> {
   const key = `${course}/${node}`
   const existing = genJobs.get(key)
   if (existing && (existing.status === 'running' || existing.status === 'cancelling')) {
     throw new Error(`「${node}」正在生成中，请稍候。`)
   }
-  const job: GenJob = { course, node, startedAt: new Date().toISOString(), status: 'running', phase: 'content' }
+  const promptKind = style ? `课程生成-${style}` : '课程生成'
+  const job: GenJob = { course, node, startedAt: new Date().toISOString(), status: 'running', phase: 'content', ...(style ? { style } : {}) }
   genJobs.set(key, job)
+  persistGenJobs()
   try {
     const pack = await engine.contentPack(course, node)
-    const tpl = await engine.loadPrompt('课程生成')
+    const tpl = await engine.loadPrompt(promptKind)
     const body = stripFences(await llmComplete(ctx, `${tpl}\n\n---\n\n${pack}`))
     // 取消语义：置旗标后 LLM 结果直接丢弃（不落盘），模型调用自然跑完
     if (job.status === 'cancelling') throw new Error('生成已取消，结果已丢弃。')
@@ -174,6 +185,7 @@ async function generateContent(ctx: Context, course: string, node: string): Prom
 
     job.phase = 'quiz'
     job.message = `${res.message}；自动出题中…`
+    persistGenJobs()
     try {
       const quiz = await generateQuiz(ctx, course, node, 6)
       job.status = 'done'
@@ -182,10 +194,12 @@ async function generateContent(ctx: Context, course: string, node: string): Prom
       job.status = 'done'
       job.message = `${res.message}；自动出题失败（${quizErr instanceof Error ? quizErr.message : String(quizErr)}）——可在练习页单独重试`
     }
+    persistGenJobs()
     return job.message
   } catch (err) {
     job.status = job.status === 'cancelling' ? 'cancelled' : 'failed'
     job.message = err instanceof Error ? err.message : String(err)
+    persistGenJobs()
     throw err
   } finally {
     // 终态保留：失败/取消留 24h 供排查与重试，成功留 30 分钟；之后清出注册表
@@ -193,12 +207,24 @@ async function generateContent(ctx: Context, course: string, node: string): Prom
     setTimeout(() => {
       const cur = genJobs.get(key)
       if (cur && cur.status !== 'running' && cur.status !== 'cancelling') genJobs.delete(key)
+      persistGenJobs()
     }, keep).unref()
   }
 }
 
-function generationStatus(): Array<GenJob & { key: string }> {
-  return [...genJobs.entries()].map(([key, j]) => ({ key, ...j }))
+/** 任务注册表视图（附各任务节点的内容版本：面板据此做增量刷新）。 */
+async function generationStatus(): Promise<Array<GenJob & { key: string; contentVersion?: number }>> {
+  const out: Array<GenJob & { key: string; contentVersion?: number }> = []
+  for (const [key, j] of genJobs.entries()) {
+    let contentVersion: number | undefined
+    try {
+      contentVersion = await engine.contentVersion(j.course, j.node)
+    } catch {
+      // 节点/课程缺失等：版本缺省，面板走全量刷新
+    }
+    out.push({ key, ...j, contentVersion })
+  }
+  return out
 }
 
 function cancelGeneration(course: string, node: string): { cancelled: boolean; status?: string } {
@@ -206,6 +232,24 @@ function cancelGeneration(course: string, node: string): { cancelled: boolean; s
   if (!job) return { cancelled: false }
   if (job.status === 'running') job.status = 'cancelling'
   return { cancelled: true, status: job.status }
+}
+
+/** 面板内轻量答疑：节点上下文 system + 前端携带的对话历史（拼成单条 user 消息）→ llm。
+ * 与 dsh 会话分层：这里只答不写，深度讨论/修订走「与 AI 讨论本课」开的会话。 */
+async function tutorChat(ctx: Context, course: string, node: string, history: unknown[]): Promise<string> {
+  const pack = await engine.discussionPack(course, node)
+  const turns = history
+    .map(h => h as { role?: unknown; content?: unknown })
+    .filter(h => (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string' && h.content.trim())
+    .slice(-12)
+  if (!turns.length || turns[turns.length - 1].role !== 'user') {
+    throw new Error('tutor 对话历史必须以学习者的提问结尾。')
+  }
+  const transcript = turns
+    .map(h => `${h.role === 'assistant' ? '[AI 老师]' : '[学习者]'} ${h.content}`)
+    .join('\n\n')
+  const system = `你是 learnhub 的 AI 老师，正在辅导学习者攻克一个课程节点。只依据下面的课程上下文与本课范围回答；超出范围的追问给一句概括并建议回到课程主线。回答用 Markdown，简洁直接，公式用 KaTeX（$...$）。\n\n${pack}`
+  return llmComplete(ctx, `${transcript}\n\n（请回答上面最后一条学习者的提问。）`, system)
 }
 
 /** 发送 JSON 响应（no-store：状态类接口禁止浏览器缓存，保证评分后即时刷新）。 */
@@ -296,6 +340,34 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       res.end(buf)
       return
     }
+    if (req.method === 'GET' && route === '/interactive') {
+      // 交互件伺服：限启用课程根内 .html；CSP 禁外联（sandbox iframe 内自包含运行，禁 vault 图片）
+      const p = url.searchParams.get('path')
+      if (!p) throw new Error('missing required field: path')
+      const rel = p.replace(/\\/g, '/').replace(/^\/+/, '')
+      if (rel.includes('..')) throw new Error('path traversal rejected')
+      if (!rel.startsWith(`${CENTER_REL}/`)) throw new Error('interactive 必须位于学习中心内')
+      const courseRoot = rel.slice(CENTER_REL.length + 1).split('/')[0]
+      if (!(await engine.enabledCourses()).some(c => c.root === courseRoot)) {
+        throw new Error(`interactive 不在任何启用课程的根内: ${courseRoot}`)
+      }
+      if (!rel.toLowerCase().endsWith('.html')) throw new Error('interactive 只允许 .html')
+      let buf: Buffer
+      try {
+        buf = await readFile(`${VAULT}/${rel}`)
+      } catch {
+        sendJson(res, 404, { error: `file not found: ${rel}` })
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy':
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:",
+        'cache-control': 'no-store',
+      })
+      res.end(buf)
+      return
+    }
     if (req.method === 'GET' && route === '/note') {
       const path = url.searchParams.get('path')
       if (!path) throw new Error('missing required field: path')
@@ -321,8 +393,23 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       sendJson(res, 200, await apiRun('api/questions-all', () => engine.questionsAll(course)))
       return
     }
+    if (req.method === 'GET' && route === '/xp') {
+      sendJson(res, 200, await apiRun('api/xp', () => engine.xpStatus()))
+      return
+    }
     if (req.method === 'GET' && route === '/generate/status') {
       sendJson(res, 200, await apiRun('api/generate/status', () => generationStatus()))
+      return
+    }
+    if (req.method === 'GET' && route === '/prompts') {
+      sendJson(res, 200, await apiRun('api/prompts', () => engine.promptKinds()))
+      return
+    }
+    if (req.method === 'GET' && route === '/discuss-pack') {
+      const node = url.searchParams.get('node')
+      if (!node) throw new Error('missing required field: node')
+      const course = url.searchParams.get('course') ?? undefined
+      sendJson(res, 200, await apiRun('api/discuss-pack', () => engine.discussionPack(course, node)))
       return
     }
     if (req.method === 'POST') {
@@ -338,7 +425,7 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
       }
       if (route === '/node/complete') {
         sendJson(res, 200, await apiRun('api/node/complete', () =>
-          engine.nodeComplete(need(body, 'course'), need(body, 'node'))))
+          engine.nodeComplete(need(body, 'course'), need(body, 'node'), body.force === true)))
         return
       }
       if (route === '/feedback') {
@@ -358,9 +445,18 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         return
       }
       if (route === '/generate') {
-        // 单次非流式：模型写完整课正文（30–90s）+ 自动出题，请求挂起直到完成
+        // 单次非流式：模型写完整课正文（30–90s）+ 自动出题，请求挂起直到完成；style = 提示词风格变体（如 苏格拉底）
+        const style = typeof body.style === 'string' && body.style.trim() ? body.style.trim() : undefined
         sendJson(res, 200, await apiRun('api/generate', async () => ({
-          message: await generateContent(ctx, need(body, 'course'), need(body, 'node')),
+          message: await generateContent(ctx, need(body, 'course'), need(body, 'node'), style),
+        })))
+        return
+      }
+      if (route === '/tutor') {
+        // 面板内轻量答疑：前端持有对话历史全量携带（最后一条必须是学习者提问）
+        const history = Array.isArray(body.messages) ? body.messages : []
+        sendJson(res, 200, await apiRun('api/tutor', async () => ({
+          answer: await tutorChat(ctx, need(body, 'course'), need(body, 'node'), history),
         })))
         return
       }
@@ -382,7 +478,8 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
         sendJson(res, 200, await apiRun('api/question-answer', () => engine.questionAnswer(
           prompt => llmComplete(ctx, prompt),
           need(body, 'course'), need(body, 'node'), need(body, 'qid'),
-          typeof body.answer === 'string' ? body.answer : '')))
+          typeof body.answer === 'string' ? body.answer : '',
+          typeof body.elapsed_s === 'number' && Number.isFinite(body.elapsed_s) ? body.elapsed_s : null)))
         return
       }
       if (route === '/question-add') {
@@ -409,6 +506,12 @@ async function handleApi(ctx: Context, req: IncomingMessage, res: ServerResponse
     }
     if (req.method === 'PUT') {
       const body = await readJson(req)
+      if (route === '/daily-goal') {
+        const goal = Number(body.goal)
+        if (!Number.isFinite(goal)) throw new Error('missing required field: goal')
+        sendJson(res, 200, await apiRun('api/daily-goal', () => engine.setDailyGoal(goal)))
+        return
+      }
       if (route === '/question-update') {
         const patch = typeof body.patch === 'object' && body.patch !== null
           ? body.patch as Record<string, unknown> : {}
@@ -436,6 +539,25 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
   if (!existsSync(center)) throw new Error(`[learnhub] 学习中心目录不存在：${center}`)
   VAULT = vault
   engine = new LearnhubEngine({ vault, centerRel: CENTER_REL })
+
+  // 生成任务注册表恢复：上次进程遗留的 running/cancelling 标为失败（LLM 调用随进程消失）
+  void engine.loadGenJobs().then(stale => {
+    for (const raw of stale) {
+      const j = raw as Partial<GenJob>
+      if (typeof j.course !== 'string' || typeof j.node !== 'string') continue
+      const key = `${j.course}/${j.node}`
+      const interrupted = j.status === 'running' || j.status === 'cancelling'
+      genJobs.set(key, {
+        course: j.course, node: j.node,
+        startedAt: typeof j.startedAt === 'string' ? j.startedAt : new Date().toISOString(),
+        status: interrupted ? 'failed' : (j.status ?? 'failed'),
+        ...(j.phase ? { phase: j.phase } : {}),
+        message: interrupted ? '进程重启，任务中断——可重试' : (typeof j.message === 'string' ? j.message : undefined),
+      })
+    }
+    persistGenJobs()
+    if (stale.length) console.log(`[learnhub] gen-jobs restored: ${stale.length} (interrupted marked failed)`)
+  })
 
   // provider/model 来自行 config（缺省用当前默认模型）
   if (config?.provider) llmCfg.provider = config.provider
@@ -466,13 +588,14 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     (args: { course: string; node: string; skipped?: boolean }) => run('learnhub_skip', async () =>
       JSON.stringify(await engine.nodeSkip(args.course, args.node, args.skipped !== false))))
   tool('learnhub_complete',
-    'Confirm a node has been learned this round: unanswered bank questions get their FSRS card initialized (due tomorrow) and the node stage moves to review, entering the review rotation.',
+    'Confirm a node has been learned this round. Accuracy below the passing line (0.6, with enough attempts) is rejected with accepted=false — review prerequisites or retry with force. On acceptance: unanswered bank questions get their FSRS card initialized (due tomorrow), the node stage moves to review, and a perfect-score completion earns bonus XP.',
     {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name' },
+      force: { type: 'boolean', description: 'true to bypass the accuracy gate' },
     },
-    (args: { course: string; node: string }) => run('learnhub_complete', async () =>
-      JSON.stringify(await engine.nodeComplete(args.course, args.node))))
+    (args: { course: string; node: string; force?: boolean }) => run('learnhub_complete', async () =>
+      JSON.stringify(await engine.nodeComplete(args.course, args.node, args.force === true))))
   tool('learnhub_lesson',
     "Fetch one node's lesson pack as JSON: course body split into teaching sections (练习/反馈 excluded, 答案 merged into 例题), prereqs, and suggested next nodes. Use this to teach a node step by step.",
     {
@@ -533,14 +656,24 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
         return JSON.stringify(await engine.graphApply(args.kind === 'edit' ? 'edit' : 'gen', args.id))
       }))
   tool('learnhub_generate',
-    'Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/提示词/课程生成.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics).',
+    'Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/提示词/课程生成.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics). style selects a prompt variant (e.g. 苏格拉底/费曼; built-ins listed by GET /prompts, custom ones live at state/提示词/课程生成-<style>.md).',
     {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name to generate' },
+      style: { type: 'string', description: 'Prompt style variant; omit for the default template' },
     },
-    (args: { course: string; node: string }) => run('learnhub_generate', () => generateContent(ctx, args.course, args.node)))
+    (args: { course: string; node: string; style?: string }) => run('learnhub_generate', () =>
+      generateContent(ctx, args.course, args.node, args.style)))
+  tool('learnhub_content_check',
+    'Run the automated content quality gates (out-of-scope references, alias consistency, unregistered code-block languages, interactive file existence) on an existing course note without applying anything. Run this after manually editing a course note in the vault; fix every reported finding.',
+    {
+      course: { type: 'string', required: true, description: 'Course name' },
+      node: { type: 'string', required: true, description: 'Node name' },
+    },
+    (args: { course: string; node: string }) => run('learnhub_content_check', async () =>
+      JSON.stringify(await engine.contentCheck(args.course, args.node))))
   tool('learnhub_question_list',
-    'List the question-bank questions of a node as JSON (no answers). Bank files live at <课程根>/题库/<节点>.yaml; kinds: single_choice / true_false / fill_in_blank / reflection.',
+    'List the question-bank questions of a node as JSON (no answers). Bank files live at <课程根>/题库/<节点>.yaml; kinds: single_choice / true_false / fill_in_blank / multi_choice / numeric / ordering / matching / reflection / open_question.',
     {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name' },
@@ -548,7 +681,7 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
     (args: { course: string; node: string }) => run('learnhub_question_list', async () =>
       JSON.stringify(await engine.questions(args.course, args.node))))
   tool('learnhub_question_save',
-    'Save a question bank for a node: validates the Bank YAML (node/kind/q/answer per kind: single_choice needs options + letter answer; true_false boolean; fill_in_blank accepted answers; reflection grading rubric) then writes <课程根>/题库/<节点>.yaml.',
+    'Save a question bank for a node: validates the Bank YAML (node/kind/q/answer per kind: single_choice needs options + letter answer; multi_choice options + letter array; true_false boolean; fill_in_blank accepted answers; numeric numeric answer + optional tol; ordering options + ordered answer items; matching left-column options + paired right-column answers; reflection grading rubric; open_question reference points) then writes <课程根>/题库/<节点>.yaml.',
     {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name (must match the node field inside the YAML)' },
@@ -562,7 +695,7 @@ export function apply(ctx: Context, config?: LearnhubConfig) {
       course: { type: 'string', required: true, description: 'Course name' },
       node: { type: 'string', required: true, description: 'Node name' },
       qid: { type: 'string', required: true, description: 'Question id inside the bank, e.g. "q1"' },
-      answer: { type: 'string', required: true, description: 'User answer (choice: letter; true_false: 对/错; fill_in_blank: text; reflection: free text)' },
+      answer: { type: 'string', required: true, description: 'User answer (choice: letter, multi_choice: comma-joined letters; true_false: 对/错; fill_in_blank: text; numeric: number; ordering/matching: newline-joined item texts in submitted order; reflection/open_question: free text)' },
     },
     (args: { course: string; node: string; qid: string; answer: string }) => run('learnhub_question_answer', async () =>
       JSON.stringify(await engine.questionAnswer(prompt => llmComplete(ctx, prompt), args.course, args.node, args.qid, args.answer))))

@@ -40,6 +40,23 @@ const STAGE_LABEL: Record<Stage, string> = {
   unseen: '未学', ready: '就绪', learning: '进行中', review: '复习', mastered: '已掌握', skipped: '已跳过',
 }
 
+/** 状态主色的 RGB（底色深浅插值用；字面值避免 var() 在叠加层的解析差异）。 */
+const STAGE_RGB: Partial<Record<Stage, [number, number, number]>> = {
+  ready: [22, 93, 255],       // primary-6 #165dff
+  learning: [22, 93, 255],
+  review: [0, 180, 42],       // success-6 #00b42a
+  mastered: [0, 180, 42],
+  skipped: [114, 46, 209],    // purple-6 #722ed1
+}
+
+/** 掌握度 → 同色系底色：alpha 0.10（刚起步）→ 0.42（充分掌握）。 */
+function masteryTint(stage: Stage, mastery: number): string | null {
+  const rgb = STAGE_RGB[stage]
+  if (!rgb) return null
+  const a = 0.10 + Math.max(0, Math.min(1, mastery)) * 0.32
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`
+}
+
 interface DagNodeData extends Record<string, unknown> {
   title: string
   depth: number
@@ -49,10 +66,13 @@ interface DagNodeData extends Record<string, unknown> {
   locked: boolean
   hasBank: boolean
   focused: boolean
+  mastery: number
+  practice: boolean
 }
 type DagNode = Node<DagNodeData, 'dagNode'>
 
-/** 节点卡片：左侧状态色条 + 标题 + 层级/区/题库元信息；推荐琥珀描边、定位红描边、锁定半透明虚线。 */
+/** 节点卡片：左侧状态色条 + 标题 + 层级/区/题库元信息；推荐琥珀描边、定位红描边、
+ * 锁定半透明虚线；底色 = 状态浅色 × 掌握度深浅（作答 EMA 实时反映）；跳过 = 紫底 + 「跳」角标。 */
 const DagNodeInner: React.FC<NodeProps<DagNode>> = ({ data }) => {
   const accent = data.focused
     ? 'var(--color-danger-6, #f53f3f)'
@@ -68,17 +88,31 @@ const DagNodeInner: React.FC<NodeProps<DagNode>> = ({ data }) => {
       : data.locked
         ? '1px dashed var(--color-border-2, #e5e6eb)'
         : '1px solid var(--color-border-2, #e5e6eb)'
-  const bg = data.stage === 'review' || data.stage === 'mastered'
-    ? 'var(--color-success-light-1, #e8ffea)'
-    : data.stage === 'learning' || data.stage === 'ready'
-      ? 'var(--color-primary-light-1, #e8f3ff)'
-      : 'var(--color-bg-2, #fff)'
+  const tint = masteryTint(data.stage, data.mastery)
+  const bg = tint ?? 'var(--color-bg-2, #fff)'
+  const tooltip = `${data.title}${data.locked ? '（前置未完成）' : ''}`
+    + (data.stage === 'review' || data.stage === 'mastered' || data.stage === 'learning'
+      ? `（掌握度 ${Math.round(data.mastery * 100)}%）` : '')
   return (
-    <div title={data.locked ? `${data.title}（前置未完成）` : data.title}
+    <div title={tooltip}
       style={{
         display: 'flex', height: '100%', alignItems: 'stretch', overflow: 'hidden',
-        borderRadius: 6, border, background: bg, opacity: data.locked ? 0.55 : 1,
+        position: 'relative', borderRadius: 6, border, background: bg, opacity: data.locked ? 0.55 : 1,
       }}>
+      {data.stage === 'skipped' && (
+        <span style={{
+          position: 'absolute', top: 0, right: 0, fontSize: 9, lineHeight: '13px',
+          padding: '0 4px', borderBottomLeftRadius: 6,
+          background: 'var(--color-purple-6, #722ed1)', color: '#fff',
+        }}>跳</span>
+      )}
+      {data.practice && (
+        <span style={{
+          position: 'absolute', top: 0, left: 0, fontSize: 9, lineHeight: '13px',
+          padding: '0 4px', borderBottomRightRadius: 6,
+          background: 'var(--color-teal-6, #14c9c9)', color: '#fff',
+        }}>练</span>
+      )}
       <span style={{ width: 3, flexShrink: 0, backgroundColor: accent }} />
       <div style={{
         display: 'flex', minWidth: 0, flex: 1, flexDirection: 'column',
@@ -97,6 +131,9 @@ const DagNodeInner: React.FC<NodeProps<DagNode>> = ({ data }) => {
           {data.recommended && <span style={{ color: 'var(--color-warning-6, #ff7d00)' }}>★</span>}
           <span>{STAGE_LABEL[data.stage]}</span>
           {data.hasBank && <span>·题</span>}
+          {(data.stage === 'review' || data.stage === 'mastered' || data.stage === 'learning') && (
+            <span>·{Math.round(data.mastery * 100)}%</span>
+          )}
         </span>
       </div>
       <Handle type='target' id='dag-target' position={Position.Bottom} isConnectable={false}
@@ -131,6 +168,8 @@ function layoutDag(doc: GraphDoc, lockedIds: Set<string>, recommendedSet: Set<st
         title: n.data.id, depth: n.data.depth, stage: n.data.stage, region: n.data.region,
         recommended: recommendedSet.has(n.data.id), locked: lockedIds.has(n.data.id),
         hasBank: bankSet.has(n.data.id), focused: n.data.id === focusNode,
+        mastery: n.data.mastery ?? 0,
+        practice: (n.data as { type?: string }).type === 'practice',
       },
     }
   })

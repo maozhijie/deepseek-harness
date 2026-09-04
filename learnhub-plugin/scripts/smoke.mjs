@@ -25,6 +25,14 @@ const step = async (name, fn) => {
 }
 
 await step('statusJson', () => engine.statusJson())
+await step('xpStatus（预算制 ETA）', () => engine.xpStatus())
+await step('promptKinds（含风格变体）', async () => {
+  const kinds = await engine.promptKinds()
+  for (const k of ['课程生成', '题目生成', '课程生成-苏格拉底', '课程生成-费曼']) {
+    if (!kinds.includes(k)) throw new Error(`missing prompt kind: ${k}`)
+  }
+  return kinds
+})
 await step('recommend', () => engine.recommend(5))
 await step('doctor', () => engine.doctor())
 await step('queueItemsAll', () => engine.queueItemsAll())
@@ -37,7 +45,8 @@ if (courses.length) {
   const c = courses[0]
   const { graph } = await engine.loadView(c)
   const node = graph.names[0]
-  // 骨架节点（正文未生成）的 exercises/lesson 是合法空态，跳过而非 FAIL
+  // 骨架节点（正文未生成）的 lesson/discussionPack 是合法空态，跳过而非 FAIL。
+  // 注：老 Python 引擎的 exercises 读路径已随纯 TS 引擎移除（练习区并入题库刷卡流 questions/questionAnswer）。
   const skipIfEmptyState = e => {
     if (/没有练习区|课程文件不存在|没有练习/.test(e.message)) {
       console.log(`SKIP ${node}: 骨架节点（${e.message}）`)
@@ -45,9 +54,10 @@ if (courses.length) {
     }
     throw e
   }
-  await step(`exercises(${node})`, () => engine.exercises(c.name, node).catch(skipIfEmptyState))
   await step(`lesson(${node})`, () => engine.lesson(c.name, node).catch(skipIfEmptyState))
   await step(`contentPack(${node})`, () => engine.contentPack(c.name, node))
+  await step(`contentVersion(${node})`, () => engine.contentVersion(c.name, node))
+  await step(`discussionPack(${node})`, () => engine.discussionPack(c.name, node).catch(skipIfEmptyState))
   await step(`questions(${node})`, () => engine.questions(c.name, node))
 }
 console.log(failed ? `\n${failed} step(s) FAILED` : '\nall smoke steps OK')

@@ -48,18 +48,24 @@ export const api = {
     http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: Array<{ title: string; md: string }>; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
   questions: (course: string, node: string) =>
     http<{ course: string; node: string; mastery: number; questions: import('./types').QuestionItem[] }>('GET', `/questions${q({ course, node })}`),
-  questionAnswer: (course: string, node: string, qid: string, answer: string) =>
-    http<import('./types').AnswerResult>('POST', '/question-answer', { course, node, qid, answer }),
+  questionAnswer: (course: string, node: string, qid: string, answer: string, elapsedS?: number) =>
+    http<import('./types').AnswerResult>('POST', '/question-answer', { course, node, qid, answer, elapsed_s: elapsedS }),
   nodeSkip: (course: string, node: string, skipped = true) =>
     http<{ course: string; node: string; stage: string }>('POST', '/node/skip', { course, node, skipped }),
-  nodeComplete: (course: string, node: string) =>
-    http<{ course: string; node: string; stage: string; initialized: number; due: string | null }>('POST', '/node/complete', { course, node }),
-  generate: (course: string, node: string) => http<{ message: string }>('POST', '/generate', { course, node }),
+  nodeComplete: (course: string, node: string, force = false) =>
+    http<{ accepted: boolean; accuracy: number | null; course: string; node: string; stage?: string; initialized?: number; due?: string | null; reason?: string }>('POST', '/node/complete', { course, node, force }),
+  generate: (course: string, node: string, style?: string) =>
+    http<{ message: string }>('POST', '/generate', { course, node, ...(style ? { style } : {}) }),
+  prompts: () => http<string[]>('GET', '/prompts'),
+  tutor: (course: string, node: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>) =>
+    http<{ answer: string }>('POST', '/tutor', { course, node, messages }),
   questionGenerate: (course: string, node: string, count = 6) =>
     http<{ course: string; node: string; added: number; skipped: number; total: number }>('POST', '/question-generate', { course, node, count }),
   generateStatus: () => http<import('./types').GenJobItem[]>('GET', '/generate/status'),
   generateCancel: (course: string, node: string) =>
     http<{ cancelled: boolean; status?: string }>('POST', '/generate/cancel', { course, node }),
+  xp: () => http<import('./types').XpStatus>('GET', '/xp'),
+  setDailyGoal: (goal: number) => http<{ goal: number }>('PUT', '/daily-goal', { goal }),
   review: (course: string, node: string) => http<{ message: string }>('POST', '/review', { course, node }),
   feedback: (path: string) => http<{ message: string }>('POST', '/feedback', { path }),
   proposals: () => http<import('./types').PropItem[]>('GET', '/proposals'),
@@ -76,4 +82,9 @@ export const api = {
   questionArchive: (course: string, node: string, qid: string, archived: boolean) =>
     http<{ course: string; node: string; qid: string; archived: boolean }>('POST', '/question-archive', { course, node, qid, archived }),
   courseDelete: (course: string) => http<{ removed: string; trash: string }>('POST', '/course/delete', { course }),
+}
+
+/** 请求宿主新开 dsh 会话讨论本课（client 侧 learnhub:discuss 桥消费；非 dsh 宿主环境无响应）。 */
+export function discussInHost(course: string, node: string, intent: string): void {
+  window.parent.postMessage({ type: 'learnhub:discuss', course, node, intent }, '*')
 }

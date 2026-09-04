@@ -6,20 +6,24 @@
  *   questions:
  *     - id: q1
  *       kind: single_choice | true_false | fill_in_blank | reflection
+ *             | multi_choice | numeric | ordering | matching | open_question
  *       q: 题干
  *       answer: "B" | true | ["答案1","答案2"] | 评分要点
- *       options: ["A. …","B. …"]        # single_choice 必填
+ *               | ["A","C"](多选字母) | 数值 | [正确顺序项](排序) | [右列配对](匹配) | 参考要点(开放)
+ *       options: ["A. …","B. …"]        # single_choice/multi_choice 必填；ordering=乱序项；matching=左列
+ *       tol: 0.01                       # numeric 可选容差
  *       explanation: 解析                # 可选
  *       difficulty: 1-3                  # 可选
  *       uses: [前置技能]                  # 可选
  *
- * 判卷语义 = allo evaluate：对 1.0 / 错 0.0；reflection 走 AI 反思判卷。
- * 作答副作用 = practice 流水 + frontmatter 计数/EMA（调度仍走 D15 settle）。
+ * 判卷语义 = allo evaluate：对 1.0 / 错 0.0；reflection/open_question 走 AI 判卷
+ * （open_question 0–10 分制，≥6 及格）。作答副作用 = practice 流水 + frontmatter
+ * 计数/EMA（调度仍走 D15 settle）。
  */
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { YAML } from './yaml.ts'
-import { normChoice } from './grading.ts'
+import { normChoice, numericOf } from './grading.ts'
 import type { AlloKind } from './grading.ts'
 import type { FsrsBlock } from './types.ts'
 import type { Paths } from './paths.ts'
@@ -35,6 +39,10 @@ export interface BankQuestion {
   difficulty?: number
   uses?: string[]
   tags?: string[]
+  /** numeric 题的数值容差（缺省 0）。 */
+  tol?: number
+  /** 来源正文节标题（mastery 会话按节轮转出题；缺省归入「通用」收尾轮）。 */
+  section?: string
   archived?: boolean
   /** 题目级 FSRS 调度（刷卡模型：每题一张卡，作答对错驱动推进）。 */
   fsrs?: FsrsBlock
@@ -44,7 +52,10 @@ export interface BankQuestion {
 
 export interface BankDoc { node: string; questions: BankQuestion[] }
 
-const KINDS: AlloKind[] = ['single_choice', 'true_false', 'fill_in_blank', 'reflection']
+const KINDS: AlloKind[] = [
+  'single_choice', 'true_false', 'fill_in_blank', 'reflection',
+  'multi_choice', 'numeric', 'ordering', 'matching', 'open_question',
+]
 
 /** 题库 schema 校验（手写，错误行风格与引擎其余门禁一致）。 */
 export function validateBank(doc: unknown, expectedNode?: string): { errors?: string[]; spec?: BankDoc } {
@@ -96,17 +107,58 @@ export function validateBank(doc: unknown, expectedNode?: string): { errors?: st
           errors.push(`questions.${n}: reflection 的 answer 必须是评分要点文本`)
           return
         }
+      } else if (kind === 'multi_choice') {
+        const options = Array.isArray(e.options) ? e.options.map(String) : []
+        const letters = options.map((_, j) => String.fromCharCode(65 + j))
+        const picks = Array.isArray(answer) ? answer.map(a => String(a).trim()) : []
+        if (options.length < 2 || !picks.length || picks.some(p => !letters.includes(normChoice(p)))) {
+          errors.push(`questions.${n}: multi_choice 需要 options（≥2）且 answer 为合法选项字母数组`)
+          return
+        }
+      } else if (kind === 'numeric') {
+        if (numericOf(String(answer)) === null) {
+          errors.push(`questions.${n}: numeric 的 answer 必须是数值（支持小数/分数/百分数）`)
+          return
+        }
+        if (e.tol !== undefined && !(Number(e.tol) > 0)) {
+          errors.push(`questions.${n}: numeric 的 tol 必须是正数`)
+          return
+        }
+      } else if (kind === 'ordering') {
+        const options = Array.isArray(e.options) ? e.options.map(String) : []
+        const seq = Array.isArray(answer) ? answer.map(String) : []
+        const same = options.length >= 2 && seq.length === options.length
+          && [...seq].sort().join('\u0000') === [...options].sort().join('\u0000')
+        if (!same) {
+          errors.push(`questions.${n}: ordering 需要 options（≥2 乱序项）且 answer 为同一组项的正确顺序排列`)
+          return
+        }
+      } else if (kind === 'matching') {
+        const options = Array.isArray(e.options) ? e.options.map(String) : []
+        const pairs = Array.isArray(answer) ? answer.map(String) : []
+        if (options.length < 2 || pairs.length !== options.length || pairs.some(p => !p.trim())) {
+          errors.push(`questions.${n}: matching 需要 options（左列 ≥2）且 answer 为与左列一一对应的右列文本数组`)
+          return
+        }
+      } else if (kind === 'open_question') {
+        if (answer !== undefined && answer !== null && typeof answer !== 'string') {
+          errors.push(`questions.${n}: open_question 的 answer 必须是参考要点文本（可省略）`)
+          return
+        }
       }
       questions.push({
         id,
         kind,
         q: String(e.q).trim(),
-        answer: Array.isArray(answer) ? answer.map(String) : answer as string | boolean,
+        answer: kind === 'numeric' ? String(answer)
+          : Array.isArray(answer) ? answer.map(String) : answer as string | boolean,
         ...(Array.isArray(e.options) && e.options.length ? { options: e.options.map(String) } : {}),
         ...(typeof e.explanation === 'string' && e.explanation ? { explanation: e.explanation } : {}),
         ...(e.difficulty !== undefined && Number.isInteger(Number(e.difficulty)) ? { difficulty: Number(e.difficulty) } : {}),
         ...(Array.isArray(e.uses) && e.uses.length ? { uses: e.uses.map(String) } : {}),
         ...(Array.isArray(e.tags) && e.tags.length ? { tags: e.tags.map(String) } : {}),
+        ...(kind === 'numeric' && Number(e.tol) > 0 ? { tol: Number(e.tol) } : {}),
+        ...(typeof e.section === 'string' && e.section.trim() ? { section: e.section.trim() } : {}),
         ...(e.archived === true ? { archived: true } : {}),
         // 调度/统计块由作答侧写入，schema 只透传不做内部校验
         ...(e.fsrs && typeof e.fsrs === 'object' ? { fsrs: e.fsrs as FsrsBlock } : {}),

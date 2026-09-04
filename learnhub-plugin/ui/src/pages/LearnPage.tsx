@@ -1,16 +1,17 @@
-/** 学习页（主界面）：复习横幅 + 「接下来学/复习」推荐流（点开直接进 LessonView）
- * + 课程卡（次要区）。二级视图 LessonView 承载正文/做题/完成。
- * 复习会话 = 刷卡：只列到期题，作答即驱动该题 FSRS 调度；无题节点提示出题。 */
+/** 学习页（主界面）：XP 时间账本条 + 复习横幅 + 「接下来学/复习」推荐流
+ * （点开直接进 LessonView）+ 课程卡（次要区）。二级视图 LessonView 承载
+ * 正文/mastery 会话/完成。复习会话 = 刷卡：只列到期题，作答即驱动该题 FSRS
+ * 调度；无题节点提示出题。 */
 import {
   Alert, Button, Card, Empty, Input, Message, Modal, Progress, Space,
   Tag, Typography,
 } from '@arco-design/web-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import LessonView from '../components/LessonView'
 import QuestionCard from '../components/QuestionCard'
 import { api } from '../api'
 import type { AppFrame } from '../App'
-import type { QuestionItem, RecEvent, RecommendDoc } from '../types'
+import type { QuestionItem, RecEvent, RecommendDoc, XpStatus } from '../types'
 
 const { Text, Title } = Typography
 
@@ -24,6 +25,29 @@ const REC_TYPE: Record<string, { label: string; color: string; order: number }> 
 const todayStr = () => {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** XP 时间账本条：今日 XP / 每日目标环 + 连续学习天数（Math Academy 的进度货币）。 */
+function XpBar({ xp, onEditGoal }: { xp: XpStatus; onEditGoal: () => void }) {
+  const percent = Math.min(100, Math.round((xp.today_xp / Math.max(1, xp.goal)) * 100))
+  return (
+    <Card size='small' style={{ borderRadius: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+        <Progress type='circle' width={44} percent={percent} showText={false} />
+        <div>
+          <Text style={{ fontWeight: 600, fontSize: 16 }}>{xp.today_xp} XP</Text>
+          <Text type='secondary' style={{ display: 'block', fontSize: 12 }}>今日 · 目标 {xp.goal} XP</Text>
+        </div>
+        <div>
+          <Text style={{ fontWeight: 600, fontSize: 16 }}>{xp.streak} 天</Text>
+          <Text type='secondary' style={{ display: 'block', fontSize: 12 }}>连续学习</Text>
+        </div>
+        <Button size='mini' type='text' style={{ marginLeft: 'auto' }} onClick={onEditGoal}>
+          调整每日目标
+        </Button>
+      </div>
+    </Card>
+  )
 }
 
 /** 复习横幅：到期题驱动（有到期题的节点数 + 开始复习）。 */
@@ -106,6 +130,8 @@ function ReviewSession(props: {
   queue: RecEvent[]
   onClose: () => void
   onFinish: () => Promise<void>
+  /** 每题作答后刷新推荐流/XP（主界面数据随作答实时更新）。 */
+  onSettled: () => void
 }) {
   const [idx, setIdx] = useState(0)
   const [questions, setQuestions] = useState<QuestionItem[] | null>(null)
@@ -149,7 +175,7 @@ function ReviewSession(props: {
           : questions.length > 0 ? (
             questions.map(q => (
               <QuestionCard key={q.id} course={item.course} node={item.node} question={q}
-                onDone={() => void loadQuestions()} />
+                onDone={() => { void loadQuestions(); props.onSettled() }} />
             ))
           ) : (
             <Alert type='info' content='该节点还没有题目：在学习视图里「AI 出题」，或直接「完成学习」。' />
@@ -180,15 +206,24 @@ function CreateDialog(props: { visible: boolean; onClose: () => void }) {
 
 export default function LearnPage({ frame }: { frame: AppFrame }) {
   const [rec, setRec] = useState<RecommendDoc | null>(null)
+  const [xp, setXp] = useState<XpStatus | null>(null)
   const [session, setSession] = useState<RecEvent[] | null>(null)
   const [createVisible, setCreateVisible] = useState(false)
   const [runningJobs, setRunningJobs] = useState(0)
 
   const load = useCallback(async () => {
     setRec(await api.recommend(12).catch(() => null))
+    setXp(await api.xp().catch(() => null))
   }, [])
 
   useEffect(() => { void load() }, [load])
+
+  // 从学习视图返回推荐流：XP/推荐流按最新数据重拉（作答结算发生在学习视图内）
+  const prevLessonRef = useRef(frame.lesson)
+  useEffect(() => {
+    if (prevLessonRef.current && !frame.lesson) void load()
+    prevLessonRef.current = frame.lesson
+  }, [frame.lesson, load])
   // 后台生成悬浮指示条（allo CourseGenerationPill 同语义）
   useEffect(() => {
     const poll = async () => {
@@ -241,6 +276,8 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
           <Button onClick={() => setCreateVisible(true)}>生成新课程</Button>
         </div>
       </div>
+      <XpBar xp={xp ?? { date: '', today_xp: 0, goal: 30, streak: 0, eta: [] }}
+        onEditGoal={() => frame.goto('stats')} />
       <ReviewBanner dueCount={reviewQueue.length} onStart={() => setSession(reviewQueue)} />
 
       {/* 核心区：「接下来学/复习」推荐流——点开直接进学习视图 */}
@@ -282,7 +319,8 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
 
       {session && session.length > 0 && (
         <ReviewSession queue={session} onClose={() => setSession(null)}
-          onFinish={async () => { await Promise.all([frame.reload(), load()]) }} />
+          onFinish={async () => { await Promise.all([frame.reload(), load()]) }}
+          onSettled={load} />
       )}
       {createVisible && <CreateDialog visible={createVisible} onClose={() => setCreateVisible(false)} />}
 
