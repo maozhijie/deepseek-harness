@@ -54,7 +54,7 @@ export interface SectionTypeSpec {
 
 /** 节 = 类型化原子学习单元；无前缀默认「概念」。 */
 export const SECTION_TYPES: SectionTypeSpec[] = [
-  { prefix: '概念', label: '概念', rule: '只讲一个知识点：为什么需要它 → 定义 → 最小示例' },
+  { prefix: '概念', label: '概念', rule: '只讲一个知识点：动机融进行文（不设栏目化标题），定义 → 最小示例' },
   { prefix: '例题', label: '例题', rule: '完整 worked example：题目 → 分步解答 → 参考答案' },
   { prefix: '演示', label: '演示', rule: '可视化承载主要信息（图表/图片/动画/交互），文字只作旁注' },
   { prefix: '小结', label: '小结', rule: '要点回顾与易错点清单' },

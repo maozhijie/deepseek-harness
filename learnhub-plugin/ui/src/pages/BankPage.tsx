@@ -240,7 +240,7 @@ function EditDrawer(props: { entry: BankEntry | null; onClose: () => void; onSav
           {props.entry.options && (
             <Space size={4} wrap>{props.entry.options.map((o, i) => (
               <Tag key={i} size='small'>
-                {props.entry.kind === 'single_choice' || props.entry.kind === 'multi_choice'
+                {props.entry?.kind === 'single_choice' || props.entry?.kind === 'multi_choice'
                   ? `${String.fromCharCode(65 + i)}. ${o}` : o}
               </Tag>
             ))}</Space>

@@ -2,10 +2,12 @@
  * 规则判卷——single_choice/multi_choice 选项作答、true_false 判断、fill_in_blank 文本、
  * numeric 数值、ordering 上移/下移排序、matching 逐左项下拉配对；
  * AI 判卷——reflection（评分要点）与 open_question（10 分制综合批改）。
+ * 题干/选项/排序项/配对项/判卷反馈经 InlineMd 渲染（Markdown+公式，与课程正文同一条链）。
  * 全部提交引擎判卷，结果内联展示判卷反馈；作答即驱动该题 FSRS 调度（对=Good、错=Again）。
  * 计时随提交上报（XP 时间账本的乱猜判定原料）；结算 XP 徽标展示（+N / 乱猜 -1 / 重复 0）。 */
 import { Button, Input, Message, Radio, Select, Tag, Typography } from '@arco-design/web-react'
 import { useRef, useState } from 'react'
+import { InlineMd } from './MdView'
 import { api } from '../api'
 import type { QuestionItem } from '../types'
 
@@ -56,7 +58,7 @@ function OrderList({ items, order, onOrder, disabled }: {
           borderRadius: 6, padding: '4px 8px', background: 'var(--color-fill-1,#f7f8fa)',
         }}>
           <Text style={{ fontSize: 12, color: 'var(--color-text-3,#86909c)', width: 18 }}>{pos + 1}.</Text>
-          <Text style={{ flex: 1, fontSize: 13 }}>{items[optIdx]}</Text>
+          <Text style={{ flex: 1, fontSize: 13 }}><InlineMd text={items[optIdx]} /></Text>
           <Button size='mini' type='text' disabled={disabled || pos === 0} onClick={() => move(pos, -1)}>↑</Button>
           <Button size='mini' type='text' disabled={disabled || pos === order.length - 1} onClick={() => move(pos, 1)}>↓</Button>
         </div>
@@ -156,13 +158,13 @@ export default function QuestionCard(props: {
         <Tag size='small' color='arcoblue'>{KIND_LABEL[q.kind]}</Tag>
         <Text type='secondary' style={{ fontSize: 12 }}>难度 {q.difficulty} · #{q.no}</Text>
       </div>
-      <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{q.q}</div>
+      <div style={{ lineHeight: 1.6 }}><InlineMd text={q.q} /></div>
 
       {isChoice && (
         q.kind === 'single_choice' ? (
           <Radio.Group value={choice} onChange={v => setChoice(v)} direction='vertical' disabled={!!outcome}>
             {opts.map((opt, i) => (
-              <Radio key={i} value={String.fromCharCode(65 + i)}>{String.fromCharCode(65 + i)}. {opt}</Radio>
+              <Radio key={i} value={String.fromCharCode(65 + i)}>{String.fromCharCode(65 + i)}. <InlineMd text={opt} /></Radio>
             ))}
           </Radio.Group>
         ) : (
@@ -186,7 +188,7 @@ export default function QuestionCard(props: {
               }}>
                 <input type='checkbox' checked={checked} disabled={!!outcome}
                   onChange={() => setMulti(m => checked ? m.filter(x => x !== letter) : [...m, letter])} />
-                <Text style={{ fontSize: 13 }}>{letter}. {opt}</Text>
+                <Text style={{ fontSize: 13 }}>{letter}. <InlineMd text={opt} /></Text>
               </label>
             )
           })}
@@ -207,12 +209,12 @@ export default function QuestionCard(props: {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {opts.map((opt, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Text style={{ fontSize: 13, minWidth: 100 }}>{opt}</Text>
+              <Text style={{ fontSize: 13, minWidth: 100 }}><InlineMd text={opt} /></Text>
               <Select
                 value={pairs[i]} placeholder='选择配对'
                 style={{ flex: 1, maxWidth: 320 }} disabled={!!outcome}
                 onChange={v => setPairs(p => ({ ...p, [i]: v as string }))}>
-                {(q.pairOptions ?? []).map((p, j) => <Select.Option key={j} value={p}>{p}</Select.Option>)}
+                {(q.pairOptions ?? []).map((p, j) => <Select.Option key={j} value={p}><InlineMd text={p} /></Select.Option>)}
               </Select>
             </div>
           ))}
@@ -242,8 +244,8 @@ export default function QuestionCard(props: {
           {outcome.feedback && (
             <div style={{
               background: 'var(--color-fill-1,#f7f8fa)', borderRadius: 6, padding: '6px 10px',
-              fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap',
-            }}>{outcome.feedback}</div>
+              fontSize: 13, lineHeight: 1.6,
+            }}><InlineMd text={outcome.feedback} /></div>
           )}
         </div>
       )}
