@@ -4,9 +4,10 @@
  * 绝不触碰真实 vault。种子课程动态探测（注册表第一门启用课），课程名不硬编码。
  * 用法：node scripts/e2e.mjs <vault 路径>
  */
-import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, writeSync } from 'node:fs'
+import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, writeSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { LearnhubEngine } from '../lib/engine.js'
 
 const todayStr = () => {
@@ -640,6 +641,45 @@ async function run() {
     const r = await engine.courseDelete(courseName)
     assert(r.removed === courseName && existsSync(r.trash), 'trash dir missing')
     assert((await engine.registry.load()).length === 0, 'registry not emptied')
+  })
+  await step('插件加载冒烟：真实 bundle + mock ctx apply（拦住 defineTool schema/注册期错误）', async () => {
+    // e2e 前面步骤都直调 engine，不经 defineTool——工具参数 schema 违规只在 dsh 启动时才爆。
+    // 这里加载构建产物并用 mock ctx 跑真实 apply：每个工具注册即编译 schema，加载期错误在这里变 FAIL。
+    // peer 包（dsh-llm/dsh-tools）不在插件的解析路径上：junction 到 workspace 包根（packages/<group>/<pkg>，
+    // 注意 packages/<group> 是分组目录本身不是包；宿主包 exports 指 lib，需已在仓库根 pnpm build 过）。
+    const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
+    const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
+    const peers = [
+      ['dsh-llm', join(repoRoot, 'packages', 'llm', 'llm')],
+      ['dsh-tools', join(repoRoot, 'packages', 'core', 'tools')],
+    ]
+    for (const [name, target] of peers) {
+      const link = join(pluginRoot, 'node_modules', '@deepseek-ai', name)
+      if (existsSync(link)) {
+        if (realpathSync(link) === realpathSync(target)) continue
+        rmSync(link, { recursive: true, force: true }) // 目标不对（如指到分组目录）则重建
+      }
+      if (!existsSync(join(target, 'package.json')) || !existsSync(join(target, 'lib'))) {
+        console.warn(`[e2e] 插件加载冒烟跳过：宿主包未构建（${target}）——先在仓库根 pnpm build 后重跑可覆盖此检查`)
+        return
+      }
+      mkdirSync(join(pluginRoot, 'node_modules', '@deepseek-ai'), { recursive: true })
+      symlinkSync(target, link, 'junction')
+    }
+    const mod = await import('../lib/index.js')
+    const tools = []
+    const ctx = {
+      tools: { register: def => { tools.push(def); return () => {} } },
+      effect: fn => fn(),
+      llm: {},
+      webServer: { register: () => () => {} },
+    }
+    await mod.apply(ctx, { vault: scratch })
+    assert(tools.length >= 25, `tool count: ${tools.length}`)
+    const names = new Set(tools.map(t => t.name))
+    for (const k of ['learnhub_graph_node', 'learnhub_graph_browse', 'learnhub_graph_path', 'learnhub_question_get', 'learnhub_question_update', 'learnhub_course_reset', 'learnhub_course_delete']) {
+      assert(names.has(k), `missing tool: ${k}`)
+    }
   })
   console.log(failed ? `\n${failed} step(s) FAILED (scratch: ${scratch})` : `\nall e2e steps OK (scratch: ${scratch})`)
   rmSync(scratch, { recursive: true, force: true })

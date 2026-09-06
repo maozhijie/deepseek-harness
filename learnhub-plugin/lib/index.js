@@ -14931,7 +14931,7 @@ function apply(ctx, config) {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name" },
       qid: { type: "string", required: true, description: 'Question id inside the bank, e.g. "q1"' },
-      patch: { type: "object", required: true, description: 'Fields to merge, e.g. {"answer":"A","explanation":"\u2026"} or {"archived":true}' }
+      patch: { type: "object", additionalProperties: true, required: true, description: 'Fields to merge, e.g. {"answer":"A","explanation":"\u2026"} or {"archived":true}' }
     },
     (args) => run("learnhub_question_update", async () => {
       if (typeof args.patch.archived === "boolean") {
