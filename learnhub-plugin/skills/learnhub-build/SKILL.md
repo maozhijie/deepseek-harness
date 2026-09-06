@@ -19,11 +19,12 @@ description: learnhub 课程构建与修订 SOP：与学习者讨论课程、修
 
 | 意图 | 工具 |
 |---|---|
-| 出题 / 补题 | `learnhub_question_save`（整份题库）或面板「AI 出题」；批量补题先 `learnhub_lesson` 拿正文 |
-| 查题 | `learnhub_question_list` |
+| 出题 / 补题 | `learnhub_question_generate`（模型管线，与自动出题同门禁）或 `learnhub_question_save`（整份手写题库） |
+| 查题 / 改题 | `learnhub_question_list`（不含答案）/ `learnhub_question_get`（单题全量含答案，改题前先看原题）/ `learnhub_question_update`（patch 合并后重新校验，`{archived:true}` 隐藏题） |
 | 调度/状态/进度 | `learnhub_status` / `learnhub_recommend` / `learnhub_rebuild` |
-| 图结构增删改 | `learnhub_graph_propose`（人审后 `learnhub_graph_apply`）——**禁止直接改 data/*.yaml** |
+| 图探索 / 图结构增删改 | 逐步查询：`learnhub_graph_node`（单节点详情+前置闭包）/ `learnhub_graph_browse`（区/块浏览）/ `learnhub_graph_path`（前置路径链）；增删改 `learnhub_graph_propose`（人审后 `learnhub_graph_apply`）——**禁止直接改 data/*.yaml** |
 | 节点跳过/完成 | `learnhub_skip` / `learnhub_complete` |
+| 重新生成内容 | 单节点 `learnhub_generate`；整课重来 `learnhub_course_reset`（备份到 .trash 后台重跑，先向用户确认） |
 
 ## 3. 课程正文修订（可编辑 vault 课程笔记）
 
@@ -35,7 +36,7 @@ description: learnhub 课程构建与修订 SOP：与学习者讨论课程、修
 3. 保留既有 `​```interactive` / `​```mermaid` / `​```media` 引用块与其文件，除非学习者明确要求改。
 4. 改完**必须**跑 `learnhub_content_check`（course + node），把 findings 全部修复后再告知完成；
    warns 如实转述。
-5. 大改（重写全节/换讲解风格）建议走 `learnhub_generate` 的 style 参数重新生成，而不是手改。
+5. 大改（重写全节/换讲解风格）建议走 `learnhub_generate` 重新生成（`style` 参数选节级风格变体，如苏格拉底/费曼），而不是手改。
 
 ## 4. 交互实践节点（type: practice）
 

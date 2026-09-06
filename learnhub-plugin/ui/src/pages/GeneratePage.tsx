@@ -1,7 +1,7 @@
 /** 生成页：待生成队列（生成队列.md 人审产物）+ 进行中/近期生成任务（服务端任务注册表）。
  * 页面刷新后状态从这里恢复（服务端注册表是事实来源，allo 同语义）。
- * 生成支持提示词风格变体（课程生成-<style>）；失败任务可一键转 dsh 会话讨论。 */
-import { Button, Card, Empty, Message, Select, Space, Table, Tag, Typography } from '@arco-design/web-react'
+ * 生成支持提示词风格变体（课程节生成-<style>，作用于逐节生成）；失败任务可一键转 dsh 会话讨论。 */
+import { Button, Card, Empty, Message, Modal, Progress, Select, Space, Table, Tag, Typography } from '@arco-design/web-react'
 import { useCallback, useEffect, useState } from 'react'
 import { api, discussInHost } from '../api'
 import type { AppFrame } from '../App'
@@ -23,6 +23,41 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [styles, setStyles] = useState<string[]>([])
   const [style, setStyle] = useState<string | undefined>(undefined)
+  const [resetSel, setResetSel] = useState<string>('')
+
+  // 整课重生成课程清单直接复用 App 已加载的课程树
+  const courses = frame?.tree?.courses.map(c => c.name) ?? []
+  const resetTarget = resetSel || frame?.course || courses[0] || ''
+
+  const confirmReset = () => {
+    if (!resetTarget) return
+    Modal.confirm({
+      title: '重新生成整课？',
+      content: (
+        <div style={{ lineHeight: 1.9 }}>
+          <div>将删除课程「{resetTarget}」的：</div>
+          <div>· 全部节正文与节清单（学习页清空）</div>
+          <div>· 全部练习题（题库）</div>
+          <div>· 全部交互件与生成的图片</div>
+          <div style={{ marginTop: 8, color: 'var(--color-text-3)' }}>
+            旧内容备份到 .trash（可恢复）；课程图谱、学习进度与掌握度保留。删除后按学习顺序逐节点重新生成，每个节点需数分钟，进度在本页实时展示。
+          </div>
+        </div>
+      ),
+      okText: '重新生成',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const r = await api.resetCourse(resetTarget)
+          Message.success(`已重置「${resetTarget}」（${r.reset.nodes.length} 节点），${r.queued} 个节点已入队重新生成`)
+          await load()
+          frame?.reload()
+        } catch (err) {
+          Message.error(err instanceof Error ? err.message : String(err))
+        }
+      },
+    })
+  }
 
   const load = useCallback(async () => {
     try {
@@ -44,12 +79,12 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
     return () => clearInterval(timer)
   }, [load])
 
-  // 风格清单 = 「课程生成」前缀的提示词类型（默认/内置变体/自建）
+  // 风格清单 = 「课程节生成」前缀的提示词类型（默认/内置变体/自建）——作用于逐节生成
   useEffect(() => {
     void api.prompts().then(kinds => {
       setStyles(kinds
-        .filter(k => k === '课程生成' || k.startsWith('课程生成-'))
-        .map(k => (k === '课程生成' ? '' : k.slice('课程生成-'.length))))
+        .filter(k => k === '课程节生成' || k.startsWith('课程节生成-'))
+        .map(k => (k === '课程节生成' ? '' : k.slice('课程节生成-'.length))))
     }).catch(() => setStyles([]))
   }, [])
 
@@ -114,7 +149,19 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
             ]} />
         )}
       </Card>
-      <Card size='small' title='正文生成任务' style={{ borderRadius: 10 }}>
+      <Card size='small' title={
+        <Space size={10}>
+          <span>正文生成任务</span>
+          {courses.length > 0 && (
+            <>
+              <Select value={resetTarget} onChange={v => setResetSel(v)} size='mini' style={{ width: 170 }}>
+                {courses.map(c => <Select.Option key={c} value={c}>{c}</Select.Option>)}
+              </Select>
+              <Button size='mini' status='danger' onClick={confirmReset}>重新生成整课</Button>
+            </>
+          )}
+        </Space>
+      } style={{ borderRadius: 10 }}>
         <Text type='secondary' style={{ display: 'block', marginBottom: 8 }}>
           生成中/近期任务在这里；刷新页面不丢失。课程图的多轮生成在 dsh 对话里进行（agent 侧）。
         </Text>
@@ -129,6 +176,18 @@ export default function GeneratePage({ frame }: { frame?: AppFrame }) {
               { title: '状态', width: 90, render: (_, j) => {
                 const t = STATUS_TAG[j.status]
                 return <Tag size='small' color={t.color}>{t.label}</Tag>
+              } },
+              { title: '进度', width: 190, render: (_, j) => {
+                const p = j.progress
+                if (!p || j.status !== 'running') return <Text type='secondary'>—</Text>
+                return (
+                  <Space size={8}>
+                    <Progress size='mini' percent={p.total ? p.done / p.total : 0} style={{ width: 64 }} />
+                    <Text type='secondary' style={{ fontSize: 12, maxWidth: 100 }} ellipsis>
+                      {p.done}/{p.total}{p.current ? ` · ${p.current}` : ''}
+                    </Text>
+                  </Space>
+                )
               } },
               { title: '信息', dataIndex: 'message', ellipsis: true },
               { title: '操作', width: 170, render: (_, j) => (

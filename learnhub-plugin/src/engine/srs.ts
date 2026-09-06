@@ -126,10 +126,11 @@ export function applyRatingBlock(
   return { fs, kind: meta.kind }
 }
 
-/** 派生展示值 mastery = f(S, 近期练习 EMA)；调度不读它。 */
+/** 派生展示值 mastery = 0.7·稳定度完成度 + 0.3·练习证据；调度不读它。
+ * 稳定度项 = min(1, S/(2·S_MASTER))：复习把 S 推向 2·S_MASTER 才渐近满分，
+ * 一次全对的会话只到三成左右；无卡（未完成学习）时稳定度项为 0，只剩练习证据。 */
 export function masteryValue(fs: FsrsBlock | null, practice: { attempts: number; correct: number }, ema: number | undefined): number {
-  if (!fs || !fs.reps) return 0
-  const sComp = Math.min(1.0, fs.stability / (S_MASTER * 2))
+  const sComp = fs && fs.reps ? Math.min(1.0, fs.stability / (S_MASTER * 2)) : 0
   if (practice.attempts >= 1 && ema && ema > 0) {
     return Math.round((0.7 * sComp + 0.3 * ema) * 100) / 100
   }
@@ -138,4 +139,9 @@ export function masteryValue(fs: FsrsBlock | null, practice: { attempts: number;
     return Math.round((0.7 * sComp + 0.3 * acc) * 100) / 100
   }
   return Math.round(sComp * 100) / 100
+}
+
+/** 节点掌握度口径的唯一入口（图/树/学习包共用）：frontmatter → masteryValue。 */
+export function masteryOfFm(fm: Fm | null | undefined): number {
+  return masteryValue(fm?.fsrs ?? null, fm?.practice ?? { attempts: 0, correct: 0 }, fm?.practice_ema)
 }

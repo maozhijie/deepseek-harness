@@ -12,9 +12,10 @@ import { YAML } from './yaml.ts'
 import { atomicWrite } from './store.ts'
 import { safeFilename } from './paths.ts'
 import type { GBlock, GNode, GRegion, EncEdge } from './types.ts'
+import { BLOOM_LEVELS } from './types.ts'
 import type { Paths } from './paths.ts'
 
-const NODE_KEYS = new Set(['name', 'pre', 'opt', 'note', 'enc', 'est', 'type'])
+const NODE_KEYS = new Set(['name', 'pre', 'opt', 'note', 'enc', 'est', 'type', 'bloom', 'difficulty'])
 const NODE_TYPES = new Set(['practice'])
 
 export class SchemaError extends Error {}
@@ -74,6 +75,17 @@ function parseNode(raw: unknown, path: string, where: string): GNode {
     const type = String(r.type)
     if (!NODE_TYPES.has(type)) fail(path, `${where}[${node.name}] type 只允许 practice`)
     node.type = type as GNode['type']
+  }
+  if (r.bloom !== undefined) {
+    if (!(BLOOM_LEVELS as readonly string[]).includes(String(r.bloom))) {
+      fail(path, `${where}[${node.name}] bloom 非法（允许 ${BLOOM_LEVELS.join('/')}）`)
+    }
+    node.bloom = r.bloom as GNode['bloom']
+  }
+  if (r.difficulty !== undefined) {
+    const difficulty = Number(r.difficulty)
+    if (![1, 2, 3, 4, 5].includes(difficulty)) fail(path, `${where}[${node.name}] difficulty 必须是 1-5`)
+    node.difficulty = difficulty as GNode['difficulty']
   }
   return node
 }
@@ -138,7 +150,7 @@ export class GraphStore {
     return out
   }
 
-  /** Region → YAML 文本（节点字段按 name/pre/opt/note/enc 顺序，省空值）。 */
+  /** Region → YAML 文本（节点字段按 name/pre/opt/note/est/type/bloom/difficulty/enc 顺序，省空值）。 */
   regionDoc(region: GRegion, color?: string): Record<string, unknown> {
     return {
       region: region.name,
@@ -152,6 +164,8 @@ export class GraphStore {
           if (n.note) doc.note = n.note
           if (n.est !== undefined) doc.est = n.est
           if (n.type) doc.type = n.type
+          if (n.bloom) doc.bloom = n.bloom
+          if (n.difficulty !== undefined) doc.difficulty = n.difficulty
           if (n.enc.length) doc.enc = n.enc.map(e => {
             const edge: Record<string, unknown> = { node: e.node, w: e.w }
             if (e.note) edge.note = e.note
@@ -179,6 +193,10 @@ export class Graph {
   estOf: Record<string, number> = {}
   /** name → 节点类型（practice 交互实践；普通节点不在表内）。 */
   typeOf: Record<string, 'practice'> = {}
+  /** name → Bloom 认知层级（可选字段；未标注的节点不在表内）。 */
+  bloomOf: Record<string, string> = {}
+  /** name → 难度 1-5（可选字段；未标注的节点不在表内）。 */
+  difficultyOf: Record<string, number> = {}
   regionIdxOf: Record<string, number> = {}
   /** name → [区序号, 区名, 块名]。 */
   blockOf: Record<string, [number, string, string]> = {}
@@ -215,6 +233,8 @@ export class Graph {
           if (node.note) this.noteOf[n] = node.note
           if (node.est !== undefined) this.estOf[n] = node.est
           if (node.type) this.typeOf[n] = node.type
+          if (node.bloom) this.bloomOf[n] = node.bloom
+          if (node.difficulty !== undefined) this.difficultyOf[n] = node.difficulty
         }
       }
     }

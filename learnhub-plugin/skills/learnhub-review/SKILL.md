@@ -1,6 +1,6 @@
 ---
 name: learnhub-review
-description: learnhub 复盘与定时任务：周复盘学习历史、巡检逾期节点，并用 schedule_create 注册每日工作单/逾期巡检/周复盘三条定时提醒。用户说「复盘」「定时提醒」「每天提醒我学习」时使用。
+description: learnhub 复盘与定时任务：周复盘学习历史、巡检逾期节点，并用 schedule_create 注册每日学习提醒/逾期巡检/周复盘三条定时提醒。用户说「复盘」「定时提醒」「每天提醒我学习」时使用。
 ---
 
 # learnhub 复盘与定时任务
@@ -21,7 +21,7 @@ description: learnhub 复盘与定时任务：周复盘学习历史、巡检逾�
 
 | 任务 | 注册方式 | 提醒内容 |
 |---|---|---|
-| 每日工作单 | `every_seconds: 86400` | 「生成今日学习工作单（learnhub_today）并汇报今天的学习/复习安排」 |
+| 每日学习提醒 | `every_seconds: 86400` | 「用 learnhub_recommend 取今日推荐队列，汇报今天的学习/复习安排」 |
 | 逾期巡检 | `every_seconds: 86400` | 「检查 learnhub_status 中的逾期复习节点，提醒用户优先处理」 |
 | 周复盘 | `every_seconds: 604800` | 「执行 learnhub-review 技能的复盘流程并向用户汇报」 |
 

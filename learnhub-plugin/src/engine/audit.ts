@@ -13,6 +13,7 @@ import type { GRegion, Fm } from './types.ts'
 import type { Graph } from './graph.ts'
 import type { Paths } from './paths.ts'
 import { parseDay, todayStr, daysBetween } from './dates.ts'
+import { graphHealthScore } from './health.ts'
 
 export interface AuditResult {
   failed: boolean
@@ -46,16 +47,20 @@ export async function runAudit(
   // E3
   if (hasCycle) errors.push(`E3 存在环！涉及 ${graph.cycleNodes.length} 个节点，例如: ${graph.cycleNodes.slice(0, 5).join('、')}`)
 
-  // R1 / R2
-  for (const n of graph.leaves) {
-    if (!hasCycle && (depth[n] ?? 0) <= 5) warns.push(`R1 浅叶子（depth=${depth[n]}）: [${name2region[n]}] ${n}`)
-  }
-  for (const n of names) {
+  // R1 / R2 —— R1 阈值随图最大深度相对化（大图 depth>20 时 depth≤5 的旁支叶子是正常收尾），
+  // 条目多时只列前 15 条附溢出行，避免淹没报告里的其他发现
+  const maxDepth = names.length ? Math.max(...names.map(n => depth[n] ?? 0)) : 0
+  const r1Depth = hasCycle ? 5 : Math.max(5, Math.round(maxDepth / 4))
+  const r1 = graph.leaves.filter(n => !hasCycle && (depth[n] ?? 0) <= r1Depth)
+  for (const n of r1.slice(0, 15)) warns.push(`R1 浅叶子: [${name2region[n]}] ${n}（depth=${depth[n]}，阈值 ${r1Depth}）`)
+  if (r1.length > 15) warns.push(`R1 浅叶子另有多 ${r1.length - 15} 处未列出`)
+  const r2 = names.filter(n => {
     const ps = preOf[n]
-    if (ps.length === 1 && depth[ps[0]] !== undefined && depth[ps[0]] <= 1 && depth[n] !== undefined && !graph.succ[n].length) {
-      warns.push(`R2 单浅前置叶子: ${n} 仅依赖 ${ps[0]}（depth=${depth[n]}）`)
-    }
-  }
+    return ps.length === 1 && depth[ps[0]] !== undefined && depth[ps[0]] <= 1 && depth[n] !== undefined && !graph.succ[n].length
+  })
+  for (const n of r2.slice(0, 15)) warns.push(`R2 单浅前置叶子: ${n} 仅依赖 ${preOf[n][0]}（depth=${depth[n]}）`)
+  if (r2.length > 15) warns.push(`R2 单浅前置叶子另有多 ${r2.length - 15} 处未列出`)
+
   // R4 深度异常
   const blockDepths: Record<string, Array<[number, string]>> = {}
   for (const n of names) {
@@ -108,7 +113,10 @@ export async function runAudit(
       if (uniq[i] !== uniq[j] && uniq[j].includes(uniq[i])) aliasHits.push(`${uniq[i]} ⊂ ${uniq[j]}`)
     }
   }
-  if (aliasHits.length) infos.push('R9 疑似别名/包含命名: ' + aliasHits.join('；'))
+  if (aliasHits.length) {
+    infos.push('R9 疑似别名/包含命名: ' + aliasHits.slice(0, 15).join('；')
+      + (aliasHits.length > 15 ? `；另有多 ${aliasHits.length - 15} 对未列出` : ''))
+  }
 
   // E4 课程文件 ↔ 图同步 + E5 frontmatter schema
   const { found, broken } = await scanAll(paths.courseDir(root))
@@ -186,6 +194,26 @@ export async function runAudit(
     }
   }
 
+  // R11/R12 认知维度（可选字段，两端都标注才查；渐进采纳不强制存量补齐）
+  const jumps = new Set<string>()
+  for (const n of names) {
+    const d = graph.difficultyOf[n]
+    if (d === undefined) continue
+    const est = graph.estOf[n]
+    if (est !== undefined && ((d >= 4 && est < 15) || (d <= 2 && est > 40))) {
+      infos.push(`R12 认知-时长失配: ${n}（难度${d}，est=${est}分钟）`)
+    }
+    for (const p of preOf[n]) {
+      if (!nset.has(p)) continue
+      const dp = graph.difficultyOf[p]
+      if (dp !== undefined && Math.abs(d - dp) >= 2) jumps.add(`${p}（难度${dp}）-> ${n}（难度${d}）`)
+    }
+  }
+  for (const j of [...jumps].sort().slice(0, 15)) {
+    warns.push(`R11 难度跳跃（疑似缺中间台阶）: ${j}`)
+  }
+  if (jumps.size > 15) warns.push(`R11 难度跳跃另有多 ${jumps.size - 15} 处未列出`)
+
   const exempt = names.filter(n => !found[n])
   const baseline: Record<string, number | string> = {
     概念节点: names.length,
@@ -196,6 +224,7 @@ export async function runAudit(
     最大深度: Object.keys(depth).length ? Math.max(...Object.values(depth)) : '-',
     '课程文件（已纳管）': Object.keys(found).length,
     未生成豁免: exempt.length,
+    图谱健康分: graphHealthScore(graph).score,
     'ERROR / WARN / INFO': `${errors.length} / ${warns.length} / ${infos.length}`,
   }
 

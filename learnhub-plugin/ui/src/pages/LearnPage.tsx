@@ -3,7 +3,7 @@
  * 正文/mastery 会话/完成。复习会话 = 刷卡：只列到期题，作答即驱动该题 FSRS
  * 调度；无题节点提示出题。 */
 import {
-  Alert, Button, Card, Empty, Input, Message, Modal, Progress, Space,
+  Alert, Button, Card, Empty, Input, Message, Modal, Popconfirm, Progress, Space,
   Tag, Typography,
 } from '@arco-design/web-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -68,8 +68,8 @@ function ReviewBanner({ dueCount, onStart }: { dueCount: number; onStart: () => 
   )
 }
 
-/** 推荐流大卡片：点开直接进 LessonView——主界面的核心动作。 */
-function RecCard({ e, onOpen }: { e: RecEvent; onOpen: () => void }) {
+/** 推荐流大卡片：点开直接进 LessonView——主界面的核心动作；内联跳过（已有基础免学）。 */
+function RecCard({ e, onOpen, onSkip }: { e: RecEvent; onOpen: () => void; onSkip: () => void }) {
   const t = REC_TYPE[e.type] ?? { label: e.type, color: 'gray', order: 9 }
   return (
     <Card size='small' hoverable style={{ borderRadius: 10, cursor: 'pointer', borderLeft: `3px solid var(--color-${t.color === 'red' ? 'danger' : t.color === 'green' ? 'success' : t.color === 'arcoblue' ? 'arcoblue' : 'primary'}-6,#165dff)` }}>
@@ -84,6 +84,15 @@ function RecCard({ e, onOpen }: { e: RecEvent; onOpen: () => void }) {
         <Button size='mini' type='primary' onClick={ev => { ev.stopPropagation(); onOpen() }}>
           {e.type === 'review' || e.type === 'overdue' ? '去复习' : '去学习'}
         </Button>
+        {/* span 拦截冒泡：卡片本体点击是打开学习，Popconfirm 触发不应进学习视图 */}
+        <span onClick={ev => ev.stopPropagation()}>
+          <Popconfirm
+            title={`跳过「${e.node}」？`}
+            content='该节点将视同已通过，不再出现在推荐与阻塞判定；可在节点学习页取消跳过。'
+            onOk={onSkip}>
+            <Button size='mini' type='text' status='warning'>跳过</Button>
+          </Popconfirm>
+        </span>
       </div>
     </Card>
   )
@@ -97,6 +106,7 @@ function CourseCard(props: {
   due: number
   onOpen: () => void
   onReview: () => void
+  onRegenerate: () => void
   onDelete: () => void
 }) {
   const notStarted = props.counts.unseen + props.counts.ready
@@ -118,6 +128,7 @@ function CourseCard(props: {
         <Space size={6}>
           <Button size='mini' onClick={props.onOpen}>打开图</Button>
           <Button size='mini' onClick={props.onReview}>复习</Button>
+          <Button size='mini' type='text' status='warning' onClick={props.onRegenerate}>重新生成</Button>
           <Button size='mini' type='text' status='danger' onClick={props.onDelete}>删除</Button>
         </Space>
       </div>
@@ -191,13 +202,13 @@ function CreateDialog(props: { visible: boolean; onClose: () => void }) {
   return (
     <Modal title='生成新课程' visible={props.visible} footer={null} onCancel={props.onClose} style={{ width: 560 }}>
       <Space direction='vertical' size={12}>
-        <Alert type='info' content='课程图由 dsh agent 按多轮流程构建（范围分析 → 骨架 → 分批展开 ≤25 ops/批 → 审计修复），保证 200+ 节点与动作句命名。' />
+        <Alert type='info' content='课程图由 dsh agent 按多轮流程构建（范围分析 → 骨架 → 分批展开 → 审计修复），复杂主题产出数百节点，节点名用动作句。' />
         <Text>在 dsh 对话里直接说：</Text>
         <Input.TextArea
           value='用 learnhub-graph-generate 技能，为我生成课程「<主题>」，起点：<已有基础>，目标：<学会什么>'
           readOnly autoSize={{ minRows: 3, maxRows: 4 }} />
         <Text type='secondary' style={{ fontSize: 12 }}>
-          提案生成后回到本面板「提案」页签审阅应用；在推荐流里点开节点即可「生成正文（自动出题）」。已有基础的节点可在学习视图里「跳过」。
+          提案生成后回到本面板「提案」页签审阅应用；在推荐流里点开节点即可「生成正文（自动出题）」。已有基础的节点可在推荐卡或节点学习页里「跳过」。
         </Text>
       </Space>
     </Modal>
@@ -263,6 +274,43 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
     })
   }
 
+  // 推荐卡内联跳过：与节点学习页同一 nodeSkip 语义（可逆，可在节点页取消）
+  const skipNode = async (e: RecEvent) => {
+    try {
+      await api.nodeSkip(e.course, e.node, true)
+      Message.success(`已跳过「${e.node}」：视同已通过，不再出现在推荐与阻塞判定`)
+      await Promise.all([frame.reload(), load()])
+    } catch (err) {
+      Message.error(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // 课程卡入口的整课重生成（与生成页同一 /course/reset 通道，进度在生成页看）
+  const regenerateCourse = (name: string) => {
+    Modal.confirm({
+      title: `重新生成课程「${name}」？`,
+      content: (
+        <div style={{ lineHeight: 1.9 }}>
+          <div>将删除该课程的：全部节正文与节清单、全部练习题、全部交互件与生成的图片。</div>
+          <div style={{ marginTop: 8, color: 'var(--color-text-3)' }}>
+            旧内容备份到 .trash（可恢复）；课程图谱、学习进度与掌握度保留。删除后按学习顺序逐节点重新生成（每个节点需数分钟），进度在「生成」页签实时展示。
+          </div>
+        </div>
+      ),
+      okText: '重新生成',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const r = await api.resetCourse(name)
+          Message.success(`已重置「${name}」（${r.reset.nodes.length} 节点），${r.queued} 个节点已入队重新生成`)
+          await Promise.all([frame.reload(), load()])
+        } catch (err) {
+          Message.error(err instanceof Error ? err.message : String(err))
+        }
+      },
+    })
+  }
+
   // 二级视图：节点学习（最大最丰富）
   if (frame.lesson) {
     return <LessonView course={frame.lesson.course} node={frame.lesson.node} frame={frame} />
@@ -288,7 +336,8 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
           <Space direction='vertical' style={{ width: '100%' }} size={10}>
             {[...reviewQueue, ...learnEvents].sort((a, b) =>
               (REC_TYPE[a.type]?.order ?? 9) - (REC_TYPE[b.type]?.order ?? 9)).map((e, i) => (
-                <RecCard key={i} e={e} onOpen={() => frame.openLesson(e.course, e.node)} />
+                <RecCard key={i} e={e} onOpen={() => frame.openLesson(e.course, e.node)}
+                  onSkip={() => void skipNode(e)} />
               ))}
           </Space>
         </Card>
@@ -306,6 +355,7 @@ export default function LearnPage({ frame }: { frame: AppFrame }) {
                 key={c.name} name={c.name} total={s?.total ?? 0} due={s?.due_today ?? 0}
                 counts={s?.counts ?? { unseen: 0, ready: 0, learning: 0, review: 0, mastered: 0, skipped: 0 }}
                 onOpen={() => { frame.setCourse(c.name); frame.goto('graph') }}
+                onRegenerate={() => regenerateCourse(c.name)}
                 onReview={() => {
                   const q = reviewQueue.filter(e => e.course === c.name)
                   if (!q.length) { Message.info('该课程暂无到期复习'); return }

@@ -45,7 +45,7 @@ export const api = {
   recommend: (limit = 8) => http<import('./types').RecommendDoc>('GET', `/recommend?limit=${limit}`),
   queue: () => http<import('./types').QueueItem[]>('GET', '/queue'),
   lesson: (node: string, course?: string) =>
-    http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: Array<{ title: string; md: string }>; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
+    http<{ course: string; node: string; region: string; stage: string; mastery: number; sections: import('./types').LessonSection[]; manifest: import('./types').SectionManifestItem[] | null; prereqs: string[]; suggest_next: string[] }>('GET', `/lesson${q({ node, course })}`),
   questions: (course: string, node: string) =>
     http<{ course: string; node: string; mastery: number; questions: import('./types').QuestionItem[] }>('GET', `/questions${q({ course, node })}`),
   questionAnswer: (course: string, node: string, qid: string, answer: string, elapsedS?: number) =>
@@ -64,6 +64,12 @@ export const api = {
   generateStatus: () => http<import('./types').GenJobItem[]>('GET', '/generate/status'),
   generateCancel: (course: string, node: string) =>
     http<{ cancelled: boolean; status?: string }>('POST', '/generate/cancel', { course, node }),
+  /** 单节重写（LessonView 节重写入口；请求挂起至该节生成完成）。 */
+  sectionRewrite: (course: string, node: string, section: string) =>
+    http<{ message: string }>('POST', '/generate/section', { course, node, section }),
+  /** 交互件成绩结算（LEARNHUB_COMPLETE；同节同日一次）。 */
+  interactiveSettle: (course: string, node: string, section: string, score: number, detail?: string) =>
+    http<{ settled: boolean; mastery: number }>('POST', '/interactive/settle', { course, node, section, score, detail }),
   xp: () => http<import('./types').XpStatus>('GET', '/xp'),
   setDailyGoal: (goal: number) => http<{ goal: number }>('PUT', '/daily-goal', { goal }),
   review: (course: string, node: string) => http<{ message: string }>('POST', '/review', { course, node }),
@@ -82,9 +88,15 @@ export const api = {
   questionArchive: (course: string, node: string, qid: string, archived: boolean) =>
     http<{ course: string; node: string; qid: string; archived: boolean }>('POST', '/question-archive', { course, node, qid, archived }),
   courseDelete: (course: string) => http<{ removed: string; trash: string }>('POST', '/course/delete', { course }),
+  /** 整课重新生成：旧正文/题目/交互件/生成图片备份进 .trash 后按拓扑序串行重跑生成管线（后台执行）。 */
+  resetCourse: (course: string) =>
+    http<{ reset: { course: string; nodes: string[]; trashed: string[] }; queued: number }>('POST', '/course/reset', { course }),
 }
 
-/** 请求宿主新开 dsh 会话讨论本课（client 侧 learnhub:discuss 桥消费；非 dsh 宿主环境无响应）。 */
+/** 请求宿主新开 dsh 会话讨论本课（client 侧 learnhub:discuss 桥消费）。
+ * 宿主形态二选一：应用内 iframe 发 parent（历史形态）；独立标签页发 window.opener。 */
 export function discussInHost(course: string, node: string, intent: string): void {
-  window.parent.postMessage({ type: 'learnhub:discuss', course, node, intent }, '*')
+  const message = { type: 'learnhub:discuss', course, node, intent }
+  if (window.parent !== window) window.parent.postMessage(message, '*')
+  else window.opener?.postMessage(message, '*')
 }

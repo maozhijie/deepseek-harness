@@ -9,7 +9,7 @@
 import { existsSync } from 'node:fs'
 import { todayStr, parseDay, daysBetween } from './dates.ts'
 import { effectiveStage } from './audit.ts'
-import { retrievability, getScheduler } from './srs.ts'
+import { retrievability, getScheduler, masteryOfFm } from './srs.ts'
 import { loadNote, asFm } from './notes.ts'
 import type { Graph } from './graph.ts'
 import type { Fm, Stage } from './types.ts'
@@ -294,7 +294,7 @@ export class Sessions {
       course: courseName, node,
       region: regionName,
       stage: effectiveStage(state, node),
-      mastery: fm.mastery,
+      mastery: masteryOfFm(fm),
       sections,
       prereqs: [...graph.preOf[node]],
       suggest_next: [...unlocks, ...candidates.filter(n => !unlocks.includes(n))].slice(0, 8),

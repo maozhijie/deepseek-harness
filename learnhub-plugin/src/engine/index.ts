@@ -10,16 +10,18 @@
  */
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { Paths } from './paths.ts'
+import { Paths, safeFilename } from './paths.ts'
 import { Registry } from './registry.ts'
 import { Store } from './store.ts'
 import { GraphStore, Graph, writeReadyList } from './graph.ts'
 import { stateMap, loadNote, saveNote, defaultFrontmatter, asFm } from './notes.ts'
-import { getScheduler, applyRatingBlock } from './srs.ts'
+import { getScheduler, applyRatingBlock, masteryOfFm } from './srs.ts'
 import { runAudit, effectiveStage } from './audit.ts'
 import { analyzeGraph } from './analysis.ts'
+import { graphHealthScore } from './health.ts'
 import { Content } from './content.ts'
 import { GraphProposals } from './gengraph.ts'
+import type { ApplyAudit } from './gengraph.ts'
 import { QuestionBank } from './question-bank.ts'
 import { YAML } from './yaml.ts'
 import { Sessions } from './sessions.ts'
@@ -29,7 +31,7 @@ import { atomicWrite } from './store.ts'
 import { REFLECTION_GRADING_SYSTEM, parseReflectionGrading, OPEN_QUESTION_GRADING_SYSTEM, parseOpenGrading, evaluateAllo, PASS_SCORE, applyPracticeEvidence } from './grading.ts'
 import { xpForAnswer, readDailyGoal, writeDailyGoal, sumXp, streakFrom, nominalBudget, difficultyCalibration } from './xp.ts'
 import { XP_GUESS_SECONDS, XP_PERFECT_BONUS } from './params.ts'
-import type { CourseEntry, Fm, FsrsBlock, Stage } from './types.ts'
+import type { CourseEntry, Fm, FsrsBlock, GNode, SectionManifest, Stage } from './types.ts'
 import type { AlloKind } from './grading.ts'
 
 /** Fisher–Yates 洗牌（返回新数组；matching 右列候选防按序泄题）。 */
@@ -225,6 +227,111 @@ export class LearnhubEngine {
     return doc
   }
 
+  // ---- 图探索（agent 逐步查询，不拉全图）----
+
+  /** 单节点图详情：schema 字段值 + 直接邻域（succ）+ enc 边（含 note）+ 前置传递闭包。 */
+  async graphNode(courseKey: string | undefined, node: string): Promise<Record<string, unknown>> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[graph-node] 节点「${node}」不在课程「${c.name}」的图内。`)
+    let gnode: GNode | undefined
+    for (const r of graph.regions) for (const b of r.blocks) {
+      const hit = b.nodes.find(n => n.name === node)
+      if (hit) { gnode = hit; break }
+    }
+    // 前置传递闭包（沿 pred BFS；不含自身），按深度降序=先学在前
+    const seen = new Set<string>([node])
+    const queue = [node]
+    while (queue.length) {
+      const u = queue.shift()!
+      for (const p of graph.preOf[u]) if (!seen.has(p)) { seen.add(p); queue.push(p) }
+    }
+    const closure = [...seen].filter(n => n !== node)
+      .sort((a, b) => (graph.depth[b] ?? 0) - (graph.depth[a] ?? 0))
+    const fm = state[node]
+    return {
+      course: c.name,
+      node,
+      region: graph.blockOf[node][1],
+      block: graph.blockOf[node][2],
+      depth: graph.depth[node] ?? 0,
+      opt: graph.opt.has(node),
+      pre: graph.preOf[node],
+      succ: graph.succ[node] ?? [],
+      enc: gnode?.enc ?? [],
+      est: graph.estOf[node],
+      type: graph.typeOf[node],
+      bloom: graph.bloomOf[node],
+      difficulty: graph.difficultyOf[node],
+      note: graph.noteOf[node],
+      stage: effectiveStage(state, node),
+      mastery: masteryOfFm(fm),
+      content: fm?.content ? { version: fm.content.version, status: fm.content.status } : undefined,
+      prereq_closure: closure,
+    }
+  }
+
+  /** 区/块浏览：按区名/块名过滤的节点清单（探索某区域的结构与内容状态）。 */
+  async graphBrowse(courseKey: string | undefined, region?: string, block?: string): Promise<Record<string, unknown>> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (region && !graph.regions.some(r => r.name === region)) {
+      throw new Error(`[graph-browse] 区「${region}」不存在（可用：${graph.regions.map(r => r.name).join('、')}）`)
+    }
+    const regions = graph.regions
+      .filter(r => !region || r.name === region)
+      .map(r => ({
+        name: r.name,
+        blocks: r.blocks
+          .filter(b => !block || b.name === block)
+          .map(b => ({
+            name: b.name,
+            nodes: b.nodes.map(n => ({
+              node: n.name,
+              depth: graph.depth[n.name] ?? 0,
+              stage: effectiveStage(state, n.name),
+              est: graph.estOf[n.name],
+              difficulty: graph.difficultyOf[n.name],
+              type: graph.typeOf[n.name],
+              content_status: state[n.name]?.content.status ?? 'draft',
+            })),
+          })),
+      }))
+    const total = regions.reduce((s, r) => s + r.blocks.reduce((t, b) => t + b.nodes.length, 0), 0)
+    return { course: c.name, total, regions }
+  }
+
+  /** 前置路径查询：from 是否（以及经哪条链）是 to 的前置。 */
+  async graphPath(courseKey: string | undefined, from: string, to: string): Promise<Record<string, unknown>> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph } = await this.loadView(c)
+    if (!graph.nset.has(from)) throw new Error(`[graph-path] from 节点「${from}」不在课程「${c.name}」的图内。`)
+    if (!graph.nset.has(to)) throw new Error(`[graph-path] to 节点「${to}」不在课程「${c.name}」的图内。`)
+    const seen = new Set<string>([to])
+    const parent: Record<string, string> = {}
+    const queue = [to]
+    while (queue.length) {
+      const u = queue.shift()!
+      for (const p of graph.preOf[u]) if (!seen.has(p)) { seen.add(p); parent[p] = u; queue.push(p) }
+    }
+    if (!seen.has(from)) {
+      return { course: c.name, from, to, related: false, message: `「${from}」不在「${to}」的前置闭包内。` }
+    }
+    const chain = [from]
+    let cur = from
+    while (cur !== to) { cur = parent[cur]; chain.push(cur) }
+    return {
+      course: c.name,
+      from,
+      to,
+      related: true,
+      direct: graph.preOf[to].includes(from),
+      closure_size: seen.size - 1,
+      chain,
+      depth_span: (graph.depth[to] ?? 0) - (graph.depth[from] ?? 0),
+    }
+  }
+
   // ---- 提案门禁包装（apply 前 audit 拦截） ----
 
   async graphPropose(kind: 'gen' | 'edit', yamlText: string): Promise<Record<string, unknown>> {
@@ -232,16 +339,16 @@ export class LearnhubEngine {
   }
 
   async graphApply(kind: 'gen' | 'edit', pid?: number): Promise<Record<string, unknown>> {
-    // audit 门禁：目标课程存在 ERROR 时拒绝 apply
+    // audit 门禁：目标课程存在 ERROR 时拒绝 apply；warns 摘要 + 健康分随 findings 返回
     const pending = await this.store.takePending(kind, pid)
     const course = await this.registry.get(pending.course)
-    let auditOk = true
+    let audit: ApplyAudit = { ok: true, warns: [], health: 0 }
     if (course) {
       const { graph } = await this.loadView(course)
-      const audit = await runAudit(this.paths, course.root, course.name, graph, graph.regions)
-      auditOk = !audit.failed
+      const result = await runAudit(this.paths, course.root, course.name, graph, graph.regions)
+      audit = { ok: !result.failed, warns: result.warns.slice(0, 8), health: graphHealthScore(graph).score }
     }
-    return kind === 'edit' ? this.proposals.applyEdit(pid, auditOk) : this.proposals.applyGen(pid, auditOk)
+    return kind === 'edit' ? this.proposals.applyEdit(pid, audit) : this.proposals.applyGen(pid, audit)
   }
 
   async graphReject(pid: number, note = ''): Promise<Record<string, unknown>> {
@@ -290,7 +397,7 @@ export class LearnhubEngine {
    * 节点笔记不存在时先建骨架（allo on-demand 语义：大纲即时、正文按需落盘）。
    * learnhub-interactive 标记块先拆出 HTML 落盘为交互件文件，再以引用块进质检门——
    * 门禁检查「interactive 引用文件存在」时文件必须已就位。 */
-  async contentApply(courseKey: string | undefined, node: string, body: string): Promise<{ version: number; message: string }> {
+  async contentApply(courseKey: string | undefined, node: string, body: string): Promise<{ version: number; message: string; hints: string[] }> {
     const c = await this.registry.resolve(courseKey)
     const { graph, state } = await this.loadView(c)
     if (!graph.nset.has(node)) throw new Error(`[apply] 节点「${node}」不在图内。`)
@@ -306,8 +413,9 @@ export class LearnhubEngine {
       await writeFile(target, f.html, 'utf8')
     }
     const gate = await this.content.gateReport(graph, c.root, node, split.body)
-    if (!gate.passed) {
-      throw new Error(`[apply] 质检门未过：\n${gate.findings.map(e => `  ✗ ${e}`).join('\n')}\n${gate.warns.map(w => `  ⚠ ${w}`).join('\n')}`)
+    const html = Content.checkInteractiveHtml(split.files)
+    if (!gate.passed || html.findings.length) {
+      throw new Error(`[apply] 质检门未过：\n${[...gate.findings, ...html.findings].map(e => `  ✗ ${e}`).join('\n')}\n${[...gate.warns, ...html.warns].map(w => `  ⚠ ${w}`).join('\n')}`)
     }
     const normalized = this.content.normalizePractice(split.body)
     const version = await this.content.applyGeneration(
@@ -317,7 +425,84 @@ export class LearnhubEngine {
     )
     await this.content.queueDone(c.root, node)
     const interactiveNote = split.files.length ? `；交互件 ${split.files.length} 个落盘 交互/` : ''
-    return { version, message: `[apply] ${node} 正文 v${version} 落盘（status=draft，待人审）${interactiveNote}` }
+    const hints = Content.encBackfeedHints(graph, node, split.body)
+    const hintNote = hints.length ? `；图依赖提醒 ${hints.length} 条` : ''
+    return { version, message: `[apply] ${node} 正文 v${version} 落盘（status=draft，待人审）${interactiveNote}${hintNote}`, hints }
+  }
+
+  /** 大纲落盘：节清单 YAML → 校验 → frontmatter content.sections（全 pending），正文不动。
+   * 骨架节点先建占位文件（allo on-demand：大纲即时）。 */
+  async contentOutline(courseKey: string | undefined, node: string, yamlText: string): Promise<SectionManifest[]> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[outline] 节点「${node}」不在图内。`)
+    if (!state[node]) await this.ensureNote(c.root, graph, node)
+    return this.content.outlineApply(c.root, graph, node, yamlText, rec => this.store.appendJournal({ ...rec, course: c.name }))
+  }
+
+  /** 整课重置（「重新生成整课」第一步）：全部节点笔记备份进 .trash 后重写为未生成骨架
+   * （content=draft/sections 清空、正文清空）；题库/交互/课程图三个生成产物目录移入同一
+   * trash 备份目录（rename，可恢复）。图谱（data/）、注册表、学习进度（state/）、
+   * 提示词快照、生成队列.md 均不动；重新生成由调用方按拓扑序串行跑生成管线。 */
+  async contentReset(courseKey: string | undefined): Promise<{ course: string; nodes: string[]; trashed: string[] }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const trashBase = `${this.paths.trashDir}/regenerate-${stamp}`
+    const nodes: string[] = []
+    for (const node of graph.order.length ? graph.order : graph.names) {
+      if (!state[node]) continue // 无笔记文件：大纲步骤会建占位，无需重置
+      const [, regionName] = graph.blockOf[node]
+      const path = this.paths.courseNotePath(c.root, regionName, node)
+      const backup = `${trashBase}/${c.root}/课程/${safeFilename(regionName)}/${safeFilename(node)}.md`
+      await mkdir(backup.replace(/[/\\][^/\\]+$/, ''), { recursive: true })
+      await writeFile(backup, await readFile(path, 'utf8'), 'utf8')
+      const { fm } = await loadNote(path)
+      await saveNote(path, {
+        ...((fm ?? {}) as Record<string, unknown>),
+        content: { version: 0, generated_at: null, status: 'draft', sections: [] },
+      }, '> 内容待生成。\n')
+      nodes.push(node)
+    }
+    const trashed: string[] = []
+    for (const dir of ['题库', '交互', '课程图']) {
+      const src = `${this.paths.courseRoot(c.root)}/${dir}`
+      if (!existsSync(src)) continue
+      await mkdir(trashBase, { recursive: true })
+      await rename(src, `${trashBase}/${dir}`)
+      trashed.push(dir)
+    }
+    await this.store.appendJournal({
+      course: c.name, node: '*', rating: null, kind: 'content_reset', elapsed_days: 0,
+      detail: `整课重置：${nodes.length} 节点笔记回 draft；移入 .trash：${trashed.join('、') || '（无）'}`,
+    })
+    return { course: c.name, nodes, trashed }
+  }
+
+  /** 单节正文落盘：门禁通过后按清单重组正文，该节置 ready/version+1；hints = enc 候选反哺提醒。 */
+  async contentSection(courseKey: string | undefined, node: string, sectionId: string, md: string): Promise<{ version: number; title: string; hints: string[] }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[section] 节点「${node}」不在图内。`)
+    return this.content.sectionApply(c.root, graph, node, sectionId, md, rec => this.store.appendJournal({ ...rec, course: c.name }))
+  }
+
+  /** 节清单视图：manifest + 每节现正文（面板节进度/单节重写入口用；
+   * 无清单旧节点回退为整篇重导出，全部 ready）。 */
+  async contentSectionsView(courseKey: string | undefined, node: string): Promise<Array<SectionManifest & { md: string | null }>> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[sections] 节点「${node}」不在图内。`)
+    const [, regionName] = graph.blockOf[node]
+    const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node))
+    const mdByTitle = new Map<string, string>()
+    for (const part of body.split(/^## /m).slice(1)) {
+      const nl = part.indexOf('\n')
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim()
+      if (title) mdByTitle.set(title, (nl >= 0 ? part.slice(nl + 1) : '').trim())
+    }
+    const manifest = state[node]?.content.sections ?? Content.manifestFromBody(body, 0)
+    return manifest.map(s => ({ ...s, md: mdByTitle.get(s.title) ?? null }))
   }
 
   async contentFeedback(courseKey: string | undefined, node: string): Promise<string> {
@@ -357,8 +542,20 @@ export class LearnhubEngine {
     const c = await this.registry.resolve(courseKey)
     const { graph, state } = await this.loadView(c)
     const lesson = await this.sessions.lesson(c.name, c.root, graph, state, node)
+    const view = lesson as Record<string, unknown>
     // 刷卡模型：mastery 由题库作答数据派生（节点 frontmatter 的旧字段不再使用）
-    ;(lesson as Record<string, unknown>).mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node)
+    view.mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node)
+    // 节清单（逐节生成）：manifest 原样下发（前端按节 id 绑题、按 type 装配轮次），
+    // 并给同名 sections 补 id/type；旧节点无清单，前端回退标题匹配。
+    const manifest = state[node]?.content.sections ?? null
+    view.manifest = manifest
+    if (manifest?.length) {
+      const byTitle = new Map(manifest.map(s => [s.title, s]))
+      for (const s of (view.sections ?? []) as Array<{ title: string; id?: string; type?: string }>) {
+        const hit = byTitle.get(s.title)
+        if (hit) { s.id = hit.id; s.type = hit.type }
+      }
+    }
     return lesson
   }
 
@@ -412,7 +609,7 @@ export class LearnhubEngine {
           nodes: b.nodes.map(n => ({
             node: n.name, opt: n.opt,
             stage: effectiveStage(state, n.name),
-            mastery: state[n.name]?.mastery ?? 0,
+            mastery: masteryOfFm(state[n.name]),
             contentVersion: state[n.name]?.content.version ?? 0,
             contentStatus: state[n.name]?.content.status ?? 'draft',
             path: this.sessions.notePath(c.root, graph, n.name),
@@ -806,6 +1003,15 @@ export class LearnhubEngine {
     return { course: c.name, node, ...r }
   }
 
+  /** 单题全量读取（含 answer/explanation）：修订/审题用——questionList 不带答案（作答流防泄题），改题前用这个看原题。 */
+  async questionGet(courseKey: string | undefined, node: string, qid: string): Promise<Record<string, unknown>> {
+    const c = await this.registry.resolve(courseKey)
+    const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
+    const q = bank.questions.find(x => x.id === qid)
+    if (!q) throw new Error(`[question-get] 「${node}」的题库没有 ${qid}（共 ${bank.questions.length} 题）。`)
+    return { course: c.name, node, question: q }
+  }
+
   async questionUpdate(courseKey: string, node: string, qid: string, patch: Record<string, unknown>): Promise<{ course: string; node: string; qid: string }> {
     const c = await this.registry.resolve(courseKey)
     await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, patch)
@@ -819,10 +1025,13 @@ export class LearnhubEngine {
   }
 
   /** AI 出题：节点正文 → 出题提示词 + llm → 产出的题库 YAML 逐题过 validateBank 门禁追加落盘。
-   * llm 由 host 注入（返回已剥围栏的纯文本）。骨架节点（无正文）直接报错。 */
+   * llm 由 host 注入（输出可能带 markdown 围栏，解析侧 parseModel 统一剥离）。骨架节点（无正文）直接报错。
+   * opts.sections = 节标注清单（逐节管线）：模型照抄清单节 id 进 section 字段；
+   * opts.generic = 只出跨节综合题（section 强制「通用」，逐节管线收尾用）。 */
   async questionGenerate(
     courseKey: string | undefined, node: string, count: number,
     llm: (prompt: string) => Promise<string>,
+    opts?: { sections?: Array<{ id: string; title: string }>; generic?: boolean },
   ): Promise<{ course: string; node: string; added: number; skipped: number; total: number }> {
     const c = await this.registry.resolve(courseKey)
     const { graph } = await this.loadView(c)
@@ -832,8 +1041,11 @@ export class LearnhubEngine {
     const body = note.body.replace(/^>\s*内容待生成。\s*$/m, '').trim()
     if (!body) throw new Error(`[quiz] 「${node}」还没有正文——先「生成正文」再出题。`)
     const tpl = await this.loadPrompt('题目生成')
-    const raw = await llm(`${tpl}\n\n## 题目数量\n\n${count} 道\n\n---\n\n${body}`)
-    const doc = YAML.parse(raw) as { node?: unknown; questions?: unknown } | null
+    const listing = opts?.sections?.length
+      ? `\n\n## 节标注清单\n\nsection 字段必须精确取自下列节 id（跨节综合题写「通用」）：\n${opts.sections.map(s => `- ${s.id} ｜ ${s.title}`).join('\n')}`
+      : ''
+    const raw = await llm(`${tpl}${listing}\n\n## 题目数量\n\n${count} 道\n\n---\n\n${body}`)
+    const doc = YAML.parseModel(raw) as { node?: unknown; questions?: unknown } | null
     if (typeof doc !== 'object' || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
       throw new Error('[quiz] 模型没有产出可用题目（questions 为空）。')
     }
@@ -843,6 +1055,7 @@ export class LearnhubEngine {
     for (const raw of doc.questions.slice(0, Math.max(1, count))) {
       const q = { ...(raw as Record<string, unknown>) }
       delete q.id // id 由 addQuestion 按现有题数自动编号，避免与既有 q1 冲突
+      if (opts?.generic) q.section = '通用' // 综合题不绑节（轮装配时统一收尾）
       try {
         await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q)
         added++
@@ -853,6 +1066,94 @@ export class LearnhubEngine {
     if (!added) throw new Error('[quiz] 模型产出的题目全部未过校验门（题型/答案格式不符），一道都没入库。')
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node)
     return { course: c.name, node, added, skipped, total: bank.questions.length }
+  }
+
+  /** 逐节出题（逐节管线第 2 段）：每个内容节一次模型调用（出题量自适应：大纲含练习节 1 道，否则 2 道），
+   * section 服务端强制为该节 id；练习/交互节跳过，正文未生成的节（断点续跑）跳过。 */
+  async questionGenerateSections(
+    courseKey: string | undefined, node: string,
+    llm: (prompt: string) => Promise<string>,
+  ): Promise<{ course: string; node: string; added: number; sections: number }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph, state } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[quiz] 节点「${node}」不在图内。`)
+    const manifest = state[node]?.content.sections
+    if (!manifest?.length) throw new Error(`[quiz] 「${node}」没有节清单——先运行大纲。`)
+    const [, regionName] = graph.blockOf[node]
+    const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node))
+    const mdByTitle = new Map<string, string>()
+    for (const part of body.split(/^## /m).slice(1)) {
+      const nl = part.indexOf('\n')
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim()
+      if (title) mdByTitle.set(title, (nl >= 0 ? part.slice(nl + 1) : '').trim())
+    }
+    const tpl = await this.loadPrompt('题目生成')
+    // 出题量自适应：大纲含练习节时内容节只出 1 道轻量题（集中练习模式：读读读→集中练），
+    // 无练习节时每节 2 道（每节自带练习）；综合轮 3 道不变（generateQuiz 调用方决定）
+    const perSection = manifest.some(s => s.type === '练习') ? 1 : 2
+    let added = 0
+    let sections = 0
+    for (const s of manifest) {
+      if (s.type === '练习' || s.type === '交互') continue
+      const sectionMd = mdByTitle.get(s.title)
+      if (!sectionMd) continue
+      sections++
+      const raw = await llm(`${tpl}\n\n## 节标注清单\n\nsection 字段必须精确写「${s.id}」（本批全部题目都属于这一节）。\n\n## 题目数量\n\n${perSection} 道\n\n---\n\n## ${s.title}\n\n${sectionMd}`)
+      let doc: { questions?: unknown } | null = null
+      try {
+        doc = YAML.parseModel(raw) as { questions?: unknown } | null
+      } catch {
+        continue // 该节模型输出非法 YAML：跳过，综合调用兼底
+      }
+      if (typeof doc !== 'object' || doc === null || !Array.isArray(doc.questions)) continue
+      for (const rawQ of doc.questions) {
+        const q = { ...((rawQ ?? {}) as Record<string, unknown>), section: s.id }
+        delete q.id
+        try {
+          await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q)
+          added++
+        } catch {
+          // 单题非法不毁整批
+        }
+      }
+    }
+    return { course: c.name, node, added, sections }
+  }
+
+  /** 交互件成绩结算：面板 sandbox iframe 上报 LEARNHUB_COMPLETE → practice 流水 +
+   * 练习证据 EMA（复用题库作答链路；judge='interactive'、qid='interactive:<节id>'）。
+   * 同一节同日只记一次（防刷）；不碰题目 FSRS（交互件不是题库题），
+   * 节点掌握度仍是题库作答正确率，不随交互件成绩变化。 */
+  async interactiveSettle(
+    courseKey: string | undefined, node: string, sectionId: string, score: number, detail?: string,
+  ): Promise<{ settled: boolean; mastery: number }> {
+    const c = await this.registry.resolve(courseKey)
+    const { graph } = await this.loadView(c)
+    if (!graph.nset.has(node)) throw new Error(`[interactive] 节点「${node}」不在图内。`)
+    if (!Number.isFinite(score)) throw new Error('[interactive] score 必须是数字。')
+    const clamped = Math.min(1, Math.max(0, score))
+    const qid = `interactive:${sectionId}`
+    const today = todayStr()
+    const played = (await this.store.practiceAll()).some(r =>
+      r.course === c.name && r.node === node && r.judge === 'interactive' && r.qid === qid
+      && r.ts.startsWith(today))
+    const mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node)
+    if (played) return { settled: false, mastery }
+    await this.store.appendPractice({
+      course: c.name, node, ex: 0, answer: detail ?? '',
+      correct: clamped >= PASS_SCORE, judge: 'interactive', qid,
+      ...(detail ? { feedback: detail } : {}),
+    })
+    const [, regionName] = graph.blockOf[node]
+    const path = this.paths.courseNotePath(c.root, regionName, node)
+    const { fm: rawFm, body } = await loadNote(path)
+    const fm = asFm(rawFm)
+    if (fm) {
+      const next = applyPracticeEvidence(fm, clamped)
+      if (next.stage === 'ready' || next.stage === 'unseen') next.stage = 'learning'
+      await saveNote(path, next as unknown as Record<string, unknown>, body)
+    }
+    return { settled: true, mastery }
   }
 
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */

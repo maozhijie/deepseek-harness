@@ -40,7 +40,7 @@ export interface GraphNodeData {
   depth: number
   stage: Stage
   opt: boolean
-  /** 掌握度 0-1（完成快照与最近作答 EMA 取大者）；底色深浅按它插值。 */
+  /** 掌握度 0-1（派生值 = 0.7·完成卡稳定度完成度 + 0.3·练习 EMA，随复习增长、不因一次全对饱和）；底色深浅按它插值。 */
   mastery?: number
   /** practice = 交互实践节点（「练」角标）。 */
   type?: string
@@ -78,7 +78,7 @@ export interface QuestionItem {
   q: string
   no: number
   difficulty: number
-  /** 来源正文节标题（mastery 会话按节轮转；null/缺省 = 旧题或旧引擎响应 → 通用收尾轮）。 */
+  /** 绑定节：节清单 id（如 s2）优先，旧题为正文节标题或「通用」（null/缺省 = 通用收尾轮）。 */
   section?: string | null
   options?: string[]
   /** matching 专属：右列候选（服务端打乱顺序，防按序泄题）。 */
@@ -115,15 +115,32 @@ export interface PropItem {
   decision_note?: string
 }
 
+/** 节清单条目（frontmatter content.sections；逐节生成管线的进度事实源）。 */
+export interface SectionManifestItem {
+  id: string
+  title: string
+  /** 节类型前缀（概念/例题/演示/类比/练习/交互…）。 */
+  type: string
+  status: 'pending' | 'ready'
+  version: number
+}
+
+/** 课程学习分节（lesson 响应；manifest 存在时带 id/type 供练习轮装配）。 */
+export interface LessonSection { title: string; md: string; id?: string; type?: string }
+
 export interface GenJobItem {
   key: string
   course: string
   node: string
   startedAt: string
   status: 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
-  /** 组合管线阶段：content（正文）→ quiz（自动出题）。 */
-  phase?: 'content' | 'quiz'
+  /** 组合管线阶段：outline（大纲）→ sections（逐节正文）→ quiz（自动出题）。 */
+  phase?: 'outline' | 'sections' | 'quiz'
+  /** 逐节进度：done=已就绪节数 total=总节数 current=正在生成的节标题。 */
+  progress?: { done: number; total: number; current?: string }
   message?: string
+  /** 课程生成提示词风格（风格变体任务整节点一次成篇）。 */
+  style?: string
   /** 该任务节点的内容版本（增量刷新依据；旧引擎响应无此字段）。 */
   contentVersion?: number
 }

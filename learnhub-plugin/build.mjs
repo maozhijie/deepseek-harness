@@ -43,6 +43,36 @@ function buildUi() {
 }
 buildUi()
 
+/** 交互件 vendored 库（host 经 /learnhub/api/vendor/* 同源伺服；沙箱 CSP 放开 'self' 后交互件仅能从这里取库）。
+ * 产物提交进 git（与 lib/web dist 同策略）：katex（min.css/JS/auto-render + woff2 字体）与 three（模块构建 + OrbitControls）。
+ * 源在 ui/node_modules（three 是 ui 的 devDependency，仅构建期用）；缺文件即失败，不静默跳过。 */
+function copyVendor() {
+  const uiModules = join(here, 'ui', 'node_modules')
+  const vendorDir = join(here, 'web', 'vendor')
+  const katexDist = join(uiModules, 'katex', 'dist')
+  const threeDir = join(uiModules, 'three')
+  const files = [
+    [join(katexDist, 'katex.min.css'), join(vendorDir, 'katex', 'katex.min.css')],
+    [join(katexDist, 'katex.min.js'), join(vendorDir, 'katex', 'katex.min.js')],
+    [join(katexDist, 'contrib', 'auto-render.min.js'), join(vendorDir, 'katex', 'contrib', 'auto-render.min.js')],
+    [join(threeDir, 'build', 'three.module.js'), join(vendorDir, 'three', 'build', 'three.module.js')],
+    [join(threeDir, 'build', 'three.core.js'), join(vendorDir, 'three', 'build', 'three.core.js')],
+    [join(threeDir, 'examples', 'jsm', 'controls', 'OrbitControls.js'), join(vendorDir, 'three', 'examples', 'jsm', 'controls', 'OrbitControls.js')],
+  ]
+  for (const [from, to] of files) {
+    if (!existsSync(from)) throw new Error(`[dsh-learnhub build] vendor source missing: ${from}（先在 ui/ npm install）`)
+    mkdirSync(dirname(to), { recursive: true })
+    cpSync(from, to)
+  }
+  const fontsDir = join(katexDist, 'fonts')
+  mkdirSync(join(vendorDir, 'katex', 'fonts'), { recursive: true })
+  for (const f of readdirSync(fontsDir)) {
+    if (f.endsWith('.woff2')) cpSync(join(fontsDir, f), join(vendorDir, 'katex', 'fonts', f))
+  }
+  console.log(`[dsh-learnhub build] vendor copied: katex + three -> ${vendorDir}`)
+}
+copyVendor()
+
 /** 产物里依赖源码（ts-fsrs JSDoc 等）遗留的纯空白行会挂 whitespace 门禁；
  *  行尾空白仅在「整行为空白」时无语义，规范为空行（模板字符串内的空行同理）。 */
 function stripBlankLineTrailingWhitespace(file) {

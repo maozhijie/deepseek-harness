@@ -7,7 +7,9 @@ import type { Graph } from './graph.ts'
 import type { Fm } from './types.ts'
 import type { Store } from './store.ts'
 import { effectiveStage } from './audit.ts'
+import { graphHealthScore } from './health.ts'
 import { parseDay, todayStr, daysBetween } from './dates.ts'
+import { masteryOfFm } from './srs.ts'
 
 export interface GraphAnalysis {
   stats: {
@@ -23,8 +25,31 @@ export interface GraphAnalysis {
   unreachable: string[]
   bottlenecks: Array<{ node: string; successors: number; unlocks: number }>
   lapse_hotspots: Array<{ node: string; lapses: number }>
+  /** 图谱健康分（0-100；结束条件锚点，公式与语义见 health.ts）。 */
+  health: { score: number; breakdown: Record<string, number> }
+  /** 分批构建建议（图谱 designer 逐批展开时规划下一批的输入，全部可行动）。 */
+  suggestions: {
+    /** 节点数 <5 的块（浅块优先，最多 8 个）——往哪扩。 */
+    expand_blocks: Array<{ region: string; block: string; nodes: number }>
+    /** depth>1 且 pre 为空的空降节点（最多 10 个）——先补谁。 */
+    missing_pre: string[]
+    /** 平均 pre 数 <1.5 的块（最多 8 个）——哪里连接过少。 */
+    unconverged: Array<{ region: string; block: string; avg_pre: number }>
+  }
   nodes: Array<{ data: { id: string; region: string; block: string; depth: number; stage: string; opt: boolean; mastery: number; type?: string } }>
   edges: Array<{ data: { id: string; source: string; target: string; kind: string; w?: number } }>
+  /** 节点 schema 全量（pre/enc/est/bloom/difficulty/note…）——编辑规划与边级自查的数据依据；
+   * elementsOnly 模式不含。 */
+  schema: Record<string, {
+    pre: string[]
+    enc: Array<{ node: string; w: number }>
+    opt: boolean
+    est?: number
+    type?: string
+    bloom?: string
+    difficulty?: number
+    note?: string
+  }>
 }
 
 export async function analyzeGraph(
@@ -68,7 +93,7 @@ export async function analyzeGraph(
     .slice(0, 10)
 
   // cytoscape 元素：渲染用边 = 传递约简后的 pre 边 + enc 成分技能边（kind 区分）
-  // 节点掌握度 = frontmatter 完成快照与最近作答 EMA 的较大者（作答即更新，图上深浅实时反映）
+  // 节点掌握度 = 派生展示值（稳定度完成度 + 练习 EMA；作答与复习实时反映，不因一次全对饱和）
   const nodes = graph.names.map(n => {
     const fm = state[n]
     return {
@@ -79,7 +104,7 @@ export async function analyzeGraph(
         depth: graph.depth[n] ?? 0,
         stage: effectiveStage(state, n),
         opt: graph.opt.has(n),
-        mastery: Math.max(fm?.mastery ?? 0, fm?.practice_ema ?? 0),
+        mastery: masteryOfFm(fm),
         ...(graph.typeOf[n] ? { type: graph.typeOf[n] } : {}),
       },
     }
@@ -89,6 +114,46 @@ export async function analyzeGraph(
     ...Object.entries(graph.encOf).flatMap(([u, list]) =>
       list.map(([v, w]) => ({ data: { id: `${u}~enc~${v}`, source: u, target: v, kind: 'enc', w } }))),
   ]
+
+  // 节点 schema 全量：编辑规划/边级自查需要每个节点的字段值（cytoscape data 只带展示字段）
+  const schema = Object.fromEntries(graph.names.map(n => [n, {
+    pre: graph.preOf[n],
+    enc: (graph.encOf[n] ?? []).map(([node, w]) => ({ node, w })),
+    opt: graph.opt.has(n),
+    ...(graph.estOf[n] !== undefined ? { est: graph.estOf[n] } : {}),
+    ...(graph.typeOf[n] ? { type: graph.typeOf[n] } : {}),
+    ...(graph.bloomOf[n] ? { bloom: graph.bloomOf[n] } : {}),
+    ...(graph.difficultyOf[n] !== undefined ? { difficulty: graph.difficultyOf[n] } : {}),
+    ...(graph.noteOf[n] ? { note: graph.noteOf[n] } : {}),
+  }]))
+
+  // 分批构建建议：块节点数（expand_blocks）、空降节点（missing_pre）、块平均前置数（unconverged）
+  const blockStats = new Map<string, { region: string; block: string; nodes: number; preSum: number }>()
+  for (const n of graph.names) {
+    const [, region, block] = graph.blockOf[n]
+    const key = `${region}\n${block}`
+    const s = blockStats.get(key) ?? { region, block, nodes: 0, preSum: 0 }
+    s.nodes++
+    s.preSum += graph.preOf[n].length
+    blockStats.set(key, s)
+  }
+  const blocks = [...blockStats.values()]
+  // 建议条目上限随图规模伸缩：数百节点的大图浅块/空降节点成倍出现，固定 top-N 看不全
+  const sugCap = Math.min(16, Math.max(8, Math.ceil(graph.names.length / 25)))
+  const expandBlocks = blocks
+    .filter(b => b.nodes < 5)
+    .sort((a, b) => a.nodes - b.nodes || a.region.localeCompare(b.region))
+    .slice(0, sugCap)
+    .map(({ region, block, nodes }) => ({ region, block, nodes }))
+  const missingPre = graph.names
+    .filter(n => (graph.depth[n] ?? 0) > 1 && graph.preOf[n].length === 0)
+    .slice(0, sugCap)
+  const unconverged = blocks
+    .map(b => ({ ...b, avg_pre: Math.round((b.preSum / b.nodes) * 100) / 100 }))
+    .filter(b => b.avg_pre < 1.5)
+    .sort((a, b) => a.avg_pre - b.avg_pre)
+    .slice(0, sugCap)
+    .map(({ region, block, avg_pre }) => ({ region, block, avg_pre }))
 
   return {
     stats: {
@@ -104,6 +169,9 @@ export async function analyzeGraph(
     unreachable,
     bottlenecks,
     lapse_hotspots: lapseHotspots,
+    health: graphHealthScore(graph),
+    suggestions: { expand_blocks: expandBlocks, missing_pre: missingPre, unconverged },
+    schema,
     nodes,
     edges,
   }

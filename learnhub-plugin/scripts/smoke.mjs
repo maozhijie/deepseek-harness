@@ -28,7 +28,7 @@ await step('statusJson', () => engine.statusJson())
 await step('xpStatus（预算制 ETA）', () => engine.xpStatus())
 await step('promptKinds（含风格变体）', async () => {
   const kinds = await engine.promptKinds()
-  for (const k of ['课程生成', '题目生成', '课程生成-苏格拉底', '课程生成-费曼']) {
+  for (const k of ['课程大纲', '课程节生成', '课程节生成-苏格拉底', '课程节生成-费曼', '题目生成']) {
     if (!kinds.includes(k)) throw new Error(`missing prompt kind: ${k}`)
   }
   return kinds

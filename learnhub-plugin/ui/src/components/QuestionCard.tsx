@@ -111,6 +111,7 @@ export default function QuestionCard(props: {
     if (isOrdering) return orderSeq.map(i => opts[i]).join('\n')
     if (isMatching) return opts.map((_, i) => pairs[i] ?? '').join('\n')
     if (q.kind === 'true_false') return choice === 'T' ? 'true' : 'false'
+    if (isChoice) return choice // single_choice：提交选中的选项字母
     return text.trim()
   }
 
@@ -158,7 +159,7 @@ export default function QuestionCard(props: {
         <Tag size='small' color='arcoblue'>{KIND_LABEL[q.kind]}</Tag>
         <Text type='secondary' style={{ fontSize: 12 }}>难度 {q.difficulty} · #{q.no}</Text>
       </div>
-      <div style={{ lineHeight: 1.6 }}><InlineMd text={q.q} /></div>
+      <div style={{ fontSize: 16, lineHeight: 1.75 }}><InlineMd text={q.q} /></div>
 
       {isChoice && (
         q.kind === 'single_choice' ? (
@@ -230,7 +231,7 @@ export default function QuestionCard(props: {
 
       {!outcome ? (
         <Button type='primary' size='small' loading={busy} disabled={!canSubmit} onClick={() => void submit()}
-          style={{ alignSelf: 'flex-start' }}>提交</Button>
+          style={{ alignSelf: 'flex-end' }}>提交</Button>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -243,8 +244,10 @@ export default function QuestionCard(props: {
           </div>
           {outcome.feedback && (
             <div style={{
-              background: 'var(--color-fill-1,#f7f8fa)', borderRadius: 6, padding: '6px 10px',
-              fontSize: 13, lineHeight: 1.6,
+              borderLeft: `3px solid ${outcome.correct === true ? 'var(--color-success-6,#00b42a)' : outcome.correct === false ? 'var(--color-danger-6,#f53f3f)' : 'var(--color-border-2,#e5e6eb)'}`,
+              background: outcome.correct === true ? 'var(--color-success-light-1,#e8ffea)' : outcome.correct === false ? 'var(--color-danger-light-1,#ffece8)' : 'var(--color-fill-1,#f7f8fa)',
+              borderRadius: '0 6px 6px 0', padding: '8px 12px',
+              fontSize: 14, lineHeight: 1.7,
             }}><InlineMd text={outcome.feedback} /></div>
           )}
         </div>

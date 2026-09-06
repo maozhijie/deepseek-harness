@@ -7496,6 +7496,16 @@ var init_yaml = __esm({
     import_yaml = __toESM(require_dist(), 1);
     YAML = {
       parse: (text) => (0, import_yaml.parse)(text),
+      /** 模型/agent 输出解析入口：先剥掉可能包裹整段输出的 markdown 代码围栏（```yaml 等
+       * 任意语言标记）再 parse——提示词虽要求「不要围栏」，但高频违反，解析边界统一容忍；
+       * 围栏未闭合时剥掉首行围栏后照常 parse，让后续 schema 校验给出可读错误。
+       * 盘上手写文件（注册表/题库/图数据/笔记）不是模型输出，仍用 parse。 */
+      parseModel: (text) => {
+        const lines = text.trim().split("\n");
+        if (lines[0]?.startsWith("```")) lines.shift();
+        if (lines.length > 0 && lines[lines.length - 1].trimEnd() === "```") lines.pop();
+        return (0, import_yaml.parse)(lines.join("\n").trim());
+      },
       stringify: (value) => (0, import_yaml.stringify)(value, { aliasDuplicateObjects: false, lineWidth: 120 })
     };
   }
@@ -7871,7 +7881,7 @@ var init_notes = __esm({
 });
 
 // src/index.ts
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync as existsSync7 } from "node:fs";
 import { readFile as readFile11, appendFile as appendFile2, mkdir as mkdir9 } from "node:fs/promises";
@@ -7945,7 +7955,13 @@ init_store();
 init_paths();
 import { readdir, readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3 } from "node:fs/promises";
 import { join } from "node:path";
-var NODE_KEYS = /* @__PURE__ */ new Set(["name", "pre", "opt", "note", "enc", "est", "type"]);
+
+// src/engine/types.ts
+var STAGES = ["unseen", "ready", "learning", "review", "mastered", "skipped"];
+var BLOOM_LEVELS = ["\u8BB0\u5FC6", "\u7406\u89E3", "\u5E94\u7528", "\u5206\u6790", "\u8BC4\u4EF7", "\u521B\u9020"];
+
+// src/engine/graph.ts
+var NODE_KEYS = /* @__PURE__ */ new Set(["name", "pre", "opt", "note", "enc", "est", "type", "bloom", "difficulty"]);
 var NODE_TYPES = /* @__PURE__ */ new Set(["practice"]);
 var SchemaError = class extends Error {
 };
@@ -8002,6 +8018,17 @@ function parseNode(raw, path, where) {
     const type = String(r.type);
     if (!NODE_TYPES.has(type)) fail(path, `${where}[${node.name}] type \u53EA\u5141\u8BB8 practice`);
     node.type = type;
+  }
+  if (r.bloom !== void 0) {
+    if (!BLOOM_LEVELS.includes(String(r.bloom))) {
+      fail(path, `${where}[${node.name}] bloom \u975E\u6CD5\uFF08\u5141\u8BB8 ${BLOOM_LEVELS.join("/")}\uFF09`);
+    }
+    node.bloom = r.bloom;
+  }
+  if (r.difficulty !== void 0) {
+    const difficulty = Number(r.difficulty);
+    if (![1, 2, 3, 4, 5].includes(difficulty)) fail(path, `${where}[${node.name}] difficulty \u5FC5\u987B\u662F 1-5`);
+    node.difficulty = difficulty;
   }
   return node;
 }
@@ -8063,7 +8090,7 @@ var GraphStore = class {
     }
     return out;
   }
-  /** Region → YAML 文本（节点字段按 name/pre/opt/note/enc 顺序，省空值）。 */
+  /** Region → YAML 文本（节点字段按 name/pre/opt/note/est/type/bloom/difficulty/enc 顺序，省空值）。 */
   regionDoc(region, color) {
     return {
       region: region.name,
@@ -8077,6 +8104,8 @@ var GraphStore = class {
           if (n.note) doc.note = n.note;
           if (n.est !== void 0) doc.est = n.est;
           if (n.type) doc.type = n.type;
+          if (n.bloom) doc.bloom = n.bloom;
+          if (n.difficulty !== void 0) doc.difficulty = n.difficulty;
           if (n.enc.length) doc.enc = n.enc.map((e) => {
             const edge = { node: e.node, w: e.w };
             if (e.note) edge.note = e.note;
@@ -8111,6 +8140,8 @@ var Graph = class {
           if (node.note) this.noteOf[n] = node.note;
           if (node.est !== void 0) this.estOf[n] = node.est;
           if (node.type) this.typeOf[n] = node.type;
+          if (node.bloom) this.bloomOf[n] = node.bloom;
+          if (node.difficulty !== void 0) this.difficultyOf[n] = node.difficulty;
         }
       }
     }
@@ -8174,6 +8205,10 @@ var Graph = class {
   estOf = {};
   /** name → 节点类型（practice 交互实践；普通节点不在表内）。 */
   typeOf = {};
+  /** name → Bloom 认知层级（可选字段；未标注的节点不在表内）。 */
+  bloomOf = {};
+  /** name → 难度 1-5（可选字段；未标注的节点不在表内）。 */
+  difficultyOf = {};
   regionIdxOf = {};
   /** name → [区序号, 区名, 块名]。 */
   blockOf = {};
@@ -10120,6 +10155,7 @@ init_dates();
 
 // src/engine/params.ts
 var DESIRED_RETENTION = 0.9;
+var S_MASTER = 30;
 var FSRS_DIFFICULTY_MID = 5;
 var XP_BASE = {
   single_choice: 1,
@@ -10229,15 +10265,104 @@ function applyRatingBlock(fsOld, ratingNum, today, sched) {
   const { fs, meta } = applyRating(pseudo, ratingNum, today, sched);
   return { fs, kind: meta.kind };
 }
+function masteryValue(fs, practice, ema) {
+  const sComp = fs && fs.reps ? Math.min(1, fs.stability / (S_MASTER * 2)) : 0;
+  if (practice.attempts >= 1 && ema && ema > 0) {
+    return Math.round((0.7 * sComp + 0.3 * ema) * 100) / 100;
+  }
+  if (practice.attempts >= 3) {
+    const acc = practice.correct / practice.attempts;
+    return Math.round((0.7 * sComp + 0.3 * acc) * 100) / 100;
+  }
+  return Math.round(sComp * 100) / 100;
+}
+function masteryOfFm(fm) {
+  return masteryValue(fm?.fsrs ?? null, fm?.practice ?? { attempts: 0, correct: 0 }, fm?.practice_ema);
+}
 
 // src/engine/audit.ts
 init_notes();
+init_dates();
 
-// src/engine/types.ts
-var STAGES = ["unseen", "ready", "learning", "review", "mastered", "skipped"];
+// src/engine/health.ts
+var ACTION_WORDS = [
+  "\u89E3",
+  "\u6C42",
+  "\u8BC1\u660E",
+  "\u63A8\u5BFC",
+  "\u8BA1\u7B97",
+  "\u8FA8\u6790",
+  "\u5EFA\u7ACB",
+  "\u6BD4\u8F83",
+  "\u5224\u5B9A",
+  "\u6784\u9020",
+  "\u533A\u5206",
+  "\u5E94\u7528",
+  "\u9A8C\u8BC1",
+  "\u5316\u7B80",
+  "\u53D8\u5F62",
+  "\u8F6C\u5316",
+  "\u4F30\u8BA1",
+  "\u8FD1\u4F3C",
+  "\u68C0\u9A8C",
+  "\u5206\u7C7B",
+  "\u5F52\u7EB3",
+  "\u62BD\u8C61",
+  "\u8BAD\u7EC3",
+  "\u8BBE\u8BA1",
+  "\u5B9E\u73B0",
+  "\u7ED8\u5236",
+  "\u5224\u65AD",
+  "\u8BC4\u4F30",
+  "\u9884\u6D4B",
+  "\u4F18\u5316",
+  "\u5217\u4E3E",
+  "\u63CF\u8FF0",
+  "\u89E3\u91CA",
+  "\u5206\u6790",
+  "\u9009\u62E9",
+  "\u8F6C\u6362",
+  "\u8BC6\u522B",
+  "\u638C\u63E1",
+  "\u7406\u89E3"
+];
+var clamp01 = (v) => Math.min(1, Math.max(0, v));
+function graphHealthScore(graph) {
+  const names = graph.names;
+  const actionHits = names.filter((n) => ACTION_WORDS.some((w) => n.includes(w))).length;
+  const actionNaming = names.length ? actionHits / names.length * 20 : 0;
+  const estCoverage = names.length ? Object.keys(graph.estOf).length / names.length * 20 : 0;
+  const floats = names.filter((n) => (graph.depth[n] ?? 0) > 1 && graph.preOf[n].length === 0).length;
+  const preCompleteness = names.length ? (1 - floats / names.length) * 20 : 0;
+  const inner = names.filter((n) => graph.preOf[n].length > 0);
+  const avgPre = inner.length ? inner.reduce((s, n) => s + graph.preOf[n].length, 0) / inner.length : 0;
+  const convergence = graph.hasCycle || !inner.length ? 0 : 20 * clamp01((avgPre - 1) / 1);
+  const uniq = [...graph.nset].sort((a, b) => a.length - b.length);
+  let aliasHits = 0;
+  for (let i = 0; i < uniq.length; i++) {
+    if (uniq[i].length < 3) continue;
+    for (let j = i + 1; j < uniq.length; j++) {
+      if (uniq[i] !== uniq[j] && uniq[j].includes(uniq[i])) aliasHits++;
+    }
+  }
+  const aliasAllowance = Math.max(1, Math.ceil(names.length / 50));
+  let hygiene = 20;
+  hygiene -= Math.min(10, Math.floor(aliasHits / aliasAllowance) * 2);
+  hygiene -= Math.min(6, Math.max(0, graph.components.length - 1) * 3);
+  hygiene -= names.length > 0 && graph.roots.length === 0 ? 4 : 0;
+  const structureHygiene = Math.max(0, hygiene);
+  const breakdown = {
+    action_naming: Math.round(actionNaming * 10) / 10,
+    est_coverage: Math.round(estCoverage * 10) / 10,
+    pre_completeness: Math.round(preCompleteness * 10) / 10,
+    convergence: Math.round(convergence * 10) / 10,
+    structure_hygiene: structureHygiene
+  };
+  const score = Math.min(100, Math.round(Object.values(breakdown).reduce((s, v) => s + v, 0)));
+  return { score, breakdown };
+}
 
 // src/engine/audit.ts
-init_dates();
 async function runAudit(paths, root, courseName, graph, regions) {
   const errors = [];
   const warns = [];
@@ -10255,15 +10380,17 @@ async function runAudit(paths, root, courseName, graph, regions) {
     }
   }
   if (hasCycle) errors.push(`E3 \u5B58\u5728\u73AF\uFF01\u6D89\u53CA ${graph.cycleNodes.length} \u4E2A\u8282\u70B9\uFF0C\u4F8B\u5982: ${graph.cycleNodes.slice(0, 5).join("\u3001")}`);
-  for (const n of graph.leaves) {
-    if (!hasCycle && (depth[n] ?? 0) <= 5) warns.push(`R1 \u6D45\u53F6\u5B50\uFF08depth=${depth[n]}\uFF09: [${name2region[n]}] ${n}`);
-  }
-  for (const n of names) {
+  const maxDepth = names.length ? Math.max(...names.map((n) => depth[n] ?? 0)) : 0;
+  const r1Depth = hasCycle ? 5 : Math.max(5, Math.round(maxDepth / 4));
+  const r1 = graph.leaves.filter((n) => !hasCycle && (depth[n] ?? 0) <= r1Depth);
+  for (const n of r1.slice(0, 15)) warns.push(`R1 \u6D45\u53F6\u5B50: [${name2region[n]}] ${n}\uFF08depth=${depth[n]}\uFF0C\u9608\u503C ${r1Depth}\uFF09`);
+  if (r1.length > 15) warns.push(`R1 \u6D45\u53F6\u5B50\u53E6\u6709\u591A ${r1.length - 15} \u5904\u672A\u5217\u51FA`);
+  const r2 = names.filter((n) => {
     const ps = preOf[n];
-    if (ps.length === 1 && depth[ps[0]] !== void 0 && depth[ps[0]] <= 1 && depth[n] !== void 0 && !graph.succ[n].length) {
-      warns.push(`R2 \u5355\u6D45\u524D\u7F6E\u53F6\u5B50: ${n} \u4EC5\u4F9D\u8D56 ${ps[0]}\uFF08depth=${depth[n]}\uFF09`);
-    }
-  }
+    return ps.length === 1 && depth[ps[0]] !== void 0 && depth[ps[0]] <= 1 && depth[n] !== void 0 && !graph.succ[n].length;
+  });
+  for (const n of r2.slice(0, 15)) warns.push(`R2 \u5355\u6D45\u524D\u7F6E\u53F6\u5B50: ${n} \u4EC5\u4F9D\u8D56 ${preOf[n][0]}\uFF08depth=${depth[n]}\uFF09`);
+  if (r2.length > 15) warns.push(`R2 \u5355\u6D45\u524D\u7F6E\u53F6\u5B50\u53E6\u6709\u591A ${r2.length - 15} \u5904\u672A\u5217\u51FA`);
   const blockDepths = {};
   for (const n of names) {
     if (depth[n] !== void 0) {
@@ -10312,7 +10439,9 @@ async function runAudit(paths, root, courseName, graph, regions) {
       if (uniq[i] !== uniq[j] && uniq[j].includes(uniq[i])) aliasHits.push(`${uniq[i]} \u2282 ${uniq[j]}`);
     }
   }
-  if (aliasHits.length) infos.push("R9 \u7591\u4F3C\u522B\u540D/\u5305\u542B\u547D\u540D: " + aliasHits.join("\uFF1B"));
+  if (aliasHits.length) {
+    infos.push("R9 \u7591\u4F3C\u522B\u540D/\u5305\u542B\u547D\u540D: " + aliasHits.slice(0, 15).join("\uFF1B") + (aliasHits.length > 15 ? `\uFF1B\u53E6\u6709\u591A ${aliasHits.length - 15} \u5BF9\u672A\u5217\u51FA` : ""));
+  }
   const { found, broken } = await scanAll(paths.courseDir(root));
   const fsErrors = /* @__PURE__ */ new Set();
   for (const p of broken) {
@@ -10385,6 +10514,24 @@ async function runAudit(paths, root, courseName, graph, regions) {
       else if (!hasCycle && !graph.isAncestor(target, n)) errors.push(`E7 enc \u975E\u7956\u5148\uFF08\u76EE\u6807\u4E0D\u5728 pre \u4F20\u9012\u95ED\u5305\u5185\uFF09: ${n} -> ${target}`);
     }
   }
+  const jumps = /* @__PURE__ */ new Set();
+  for (const n of names) {
+    const d = graph.difficultyOf[n];
+    if (d === void 0) continue;
+    const est = graph.estOf[n];
+    if (est !== void 0 && (d >= 4 && est < 15 || d <= 2 && est > 40)) {
+      infos.push(`R12 \u8BA4\u77E5-\u65F6\u957F\u5931\u914D: ${n}\uFF08\u96BE\u5EA6${d}\uFF0Cest=${est}\u5206\u949F\uFF09`);
+    }
+    for (const p of preOf[n]) {
+      if (!nset.has(p)) continue;
+      const dp = graph.difficultyOf[p];
+      if (dp !== void 0 && Math.abs(d - dp) >= 2) jumps.add(`${p}\uFF08\u96BE\u5EA6${dp}\uFF09-> ${n}\uFF08\u96BE\u5EA6${d}\uFF09`);
+    }
+  }
+  for (const j of [...jumps].sort().slice(0, 15)) {
+    warns.push(`R11 \u96BE\u5EA6\u8DF3\u8DC3\uFF08\u7591\u4F3C\u7F3A\u4E2D\u95F4\u53F0\u9636\uFF09: ${j}`);
+  }
+  if (jumps.size > 15) warns.push(`R11 \u96BE\u5EA6\u8DF3\u8DC3\u53E6\u6709\u591A ${jumps.size - 15} \u5904\u672A\u5217\u51FA`);
   const exempt = names.filter((n) => !found[n]);
   const baseline = {
     \u6982\u5FF5\u8282\u70B9: names.length,
@@ -10395,6 +10542,7 @@ async function runAudit(paths, root, courseName, graph, regions) {
     \u6700\u5927\u6DF1\u5EA6: Object.keys(depth).length ? Math.max(...Object.values(depth)) : "-",
     "\u8BFE\u7A0B\u6587\u4EF6\uFF08\u5DF2\u7EB3\u7BA1\uFF09": Object.keys(found).length,
     \u672A\u751F\u6210\u8C41\u514D: exempt.length,
+    \u56FE\u8C31\u5065\u5EB7\u5206: graphHealthScore(graph).score,
     "ERROR / WARN / INFO": `${errors.length} / ${warns.length} / ${infos.length}`
   };
   const lines = [];
@@ -10470,7 +10618,7 @@ async function analyzeGraph(courseName, graph, state, store) {
         depth: graph.depth[n] ?? 0,
         stage: effectiveStage(state, n),
         opt: graph.opt.has(n),
-        mastery: Math.max(fm?.mastery ?? 0, fm?.practice_ema ?? 0),
+        mastery: masteryOfFm(fm),
         ...graph.typeOf[n] ? { type: graph.typeOf[n] } : {}
       }
     };
@@ -10479,6 +10627,31 @@ async function analyzeGraph(courseName, graph, state, store) {
     ...graph.edges.map(([u, v]) => ({ data: { id: `${u}->${v}`, source: u, target: v, kind: "pre" } })),
     ...Object.entries(graph.encOf).flatMap(([u, list]) => list.map(([v, w]) => ({ data: { id: `${u}~enc~${v}`, source: u, target: v, kind: "enc", w } })))
   ];
+  const schema = Object.fromEntries(graph.names.map((n) => [n, {
+    pre: graph.preOf[n],
+    enc: (graph.encOf[n] ?? []).map(([node, w]) => ({ node, w })),
+    opt: graph.opt.has(n),
+    ...graph.estOf[n] !== void 0 ? { est: graph.estOf[n] } : {},
+    ...graph.typeOf[n] ? { type: graph.typeOf[n] } : {},
+    ...graph.bloomOf[n] ? { bloom: graph.bloomOf[n] } : {},
+    ...graph.difficultyOf[n] !== void 0 ? { difficulty: graph.difficultyOf[n] } : {},
+    ...graph.noteOf[n] ? { note: graph.noteOf[n] } : {}
+  }]));
+  const blockStats = /* @__PURE__ */ new Map();
+  for (const n of graph.names) {
+    const [, region, block] = graph.blockOf[n];
+    const key = `${region}
+${block}`;
+    const s = blockStats.get(key) ?? { region, block, nodes: 0, preSum: 0 };
+    s.nodes++;
+    s.preSum += graph.preOf[n].length;
+    blockStats.set(key, s);
+  }
+  const blocks = [...blockStats.values()];
+  const sugCap = Math.min(16, Math.max(8, Math.ceil(graph.names.length / 25)));
+  const expandBlocks = blocks.filter((b) => b.nodes < 5).sort((a, b) => a.nodes - b.nodes || a.region.localeCompare(b.region)).slice(0, sugCap).map(({ region, block, nodes: nodes2 }) => ({ region, block, nodes: nodes2 }));
+  const missingPre = graph.names.filter((n) => (graph.depth[n] ?? 0) > 1 && graph.preOf[n].length === 0).slice(0, sugCap);
+  const unconverged = blocks.map((b) => ({ ...b, avg_pre: Math.round(b.preSum / b.nodes * 100) / 100 })).filter((b) => b.avg_pre < 1.5).sort((a, b) => a.avg_pre - b.avg_pre).slice(0, sugCap).map(({ region, block, avg_pre }) => ({ region, block, avg_pre }));
   return {
     stats: {
       nodes: graph.names.length,
@@ -10493,18 +10666,23 @@ async function analyzeGraph(courseName, graph, state, store) {
     unreachable,
     bottlenecks,
     lapse_hotspots: lapseHotspots,
+    health: graphHealthScore(graph),
+    suggestions: { expand_blocks: expandBlocks, missing_pre: missingPre, unconverged },
+    schema,
     nodes,
     edges
   };
 }
 
 // src/engine/content.ts
+init_yaml();
 init_dates();
 init_notes();
 import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, readdir as readdir3 } from "node:fs/promises";
 import { existsSync as existsSync2 } from "node:fs";
 
 // shared/content-renderers.ts
+var INTERACTIVE_TYPES = ["simulation", "visualization3d", "diagram", "game", "code"];
 var RENDERERS = [
   {
     lang: "mermaid",
@@ -10529,14 +10707,56 @@ var RENDERERS = [
     label: "\u4EA4\u4E92\u6A21\u62DF",
     hint: "\u4EE3\u7801\u5757\u5185\u5199\u4E00\u4E2A vault \u76F8\u5BF9 HTML \u8DEF\u5F84\uFF08\u81EA\u5305\u542B\u4EA4\u4E92\u4EF6\uFF0C\u7981\u5916\u8054\uFF09\uFF0C\u9762\u677F\u5185\u5D4C\u6C99\u7BB1\u6E32\u67D3\uFF1B\u4EA4\u4E92\u4EF6\u7ED3\u5C3E\u5E94 postMessage({type:'LEARNHUB_COMPLETE'},'*') \u4E0A\u62A5\u5B8C\u6210",
     example: "```interactive\n<\u8BFE\u7A0B\u6839>/\u4EA4\u4E92/\u5355\u6446\u6A21\u62DF.html\n```"
+  },
+  {
+    lang: "svg",
+    label: "SVG \u793A\u610F\u56FE",
+    hint: "\u7CBE\u786E\u9759\u6001\u793A\u610F\u56FE\uFF08\u51E0\u4F55\u56FE\u5F62/\u5411\u91CF/\u5750\u6807\u7CFB/\u7ED3\u6784\u56FE\u793A\uFF09\uFF1A\u5B8C\u6574\u624B\u5199 SVG\uFF0C\u53EF\u76F4\u63A5\u5185\u8054 <animate>/<animateTransform> \u505A\u52A8\u753B\uFF1B\u9762\u677F\u6E05\u6D17\u540E\u6E32\u67D3\uFF0C\u7981 <script> \u4E0E\u5916\u90E8\u5F15\u7528",
+    example: '```svg\n<svg viewBox="0 0 220 120" xmlns="http://www.w3.org/2000/svg">\n  <line x1="10" y1="100" x2="210" y2="100" stroke="#86909c" stroke-width="1"/>\n  <path d="M10 100 Q80 10 200 40" fill="none" stroke="#165dff" stroke-width="2"/>\n  <circle cx="200" cy="40" r="3" fill="#f53f3f"/>\n  <text x="180" y="30" font-size="12">P</text>\n</svg>\n```'
+  },
+  {
+    lang: "plot",
+    label: "\u51FD\u6570\u56FE\u50CF/\u5750\u6807\u51E0\u4F55",
+    hint: "\u6570\u5B66\u5750\u6807\u56FE\uFF1AJSON spec\uFF08xRange/yRange + elements\uFF09\u58F0\u660E\u6570\u5B66\u5BF9\u8C61\uFF08\u51FD\u6570/\u53C2\u6570\u66F2\u7EBF/\u70B9/\u5411\u91CF/\u7EBF\u6BB5/\u5706/\u591A\u8FB9\u5F62\uFF09\uFF0C\u9762\u677F\u7528\u5750\u6807\u7CFB\u6E32\u67D3\u2014\u2014\u6A21\u578B\u53EA\u7ED9\u6570\u5B66\u5BF9\u8C61\uFF0C\u4E0D\u5199\u50CF\u7D20",
+    example: '```plot\n{ "xRange": [-4, 4], "yRange": [-3, 3],\n  "elements": [\n    { "type": "fn", "expr": "sin(x)", "label": "f(x)" },\n    { "type": "vector", "tail": [0, 0], "head": [1.57, 1], "label": "v" },\n    { "type": "point", "x": 1.57, "y": 1, "label": "P" } ] }\n```'
+  },
+  {
+    lang: "chart",
+    label: "\u6570\u636E\u56FE\u8868",
+    hint: "\u6570\u636E\u53EF\u89C6\u5316\uFF1A\u6807\u51C6 ECharts option JSON\uFF08series \u9650 line/bar/pie/scatter\uFF09\uFF0C\u9762\u677F\u6309\u9700\u6E32\u67D3\uFF08\u81EA\u5E26\u52A8\u753B\uFF09\uFF1B\u7981\u5916\u90E8 URL",
+    example: '```chart\n{ "xAxis": { "type": "category", "data": ["\u5468\u4E00","\u5468\u4E8C","\u5468\u4E09","\u5468\u56DB","\u5468\u4E94"] },\n  "yAxis": { "type": "value" },\n  "series": [ { "type": "line", "name": "\u590D\u4E60\u91CF", "data": [4, 7, 5, 9, 12], "smooth": true } ] }\n```'
   }
 ];
+var SECTION_TYPES = [
+  { prefix: "\u6982\u5FF5", label: "\u6982\u5FF5", rule: "\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF1A\u52A8\u673A\u878D\u8FDB\u884C\u6587\uFF08\u4E0D\u8BBE\u680F\u76EE\u5316\u6807\u9898\uFF09\uFF0C\u5B9A\u4E49 \u2192 \u6700\u5C0F\u793A\u4F8B" },
+  { prefix: "\u4F8B\u9898", label: "\u4F8B\u9898", rule: "\u5B8C\u6574 worked example\uFF1A\u9898\u76EE \u2192 \u5206\u6B65\u89E3\u7B54 \u2192 \u53C2\u8003\u7B54\u6848" },
+  { prefix: "\u6F14\u793A", label: "\u6F14\u793A", rule: "\u53EF\u89C6\u5316\u627F\u8F7D\u4E3B\u8981\u4FE1\u606F\uFF08\u56FE\u8868/\u56FE\u7247/\u52A8\u753B/\u4EA4\u4E92\uFF09\uFF0C\u6587\u5B57\u53EA\u4F5C\u65C1\u6CE8" },
+  { prefix: "\u5C0F\u7ED3", label: "\u5C0F\u7ED3", rule: "\u8981\u70B9\u56DE\u987E\u4E0E\u6613\u9519\u70B9\u6E05\u5355" },
+  { prefix: "\u7EC3\u4E60", label: "\u7EC3\u4E60", rule: "\u672C\u8282\u4E3A\u9898\u7EC4\uFF1A\u9898\u76EE\u7531\u9898\u5E93\u63D0\u4F9B\uFF0C\u6B63\u6587\u53EA\u5199\u80FD\u529B\u76EE\u6807\u4E0E\u4F5C\u7B54\u5F15\u5BFC\uFF08\u2264120 \u5B57\uFF09\uFF0C\u4E0D\u5199\u9898" },
+  { prefix: "\u4EA4\u4E92", label: "\u4EA4\u4E92", rule: "\u4E00\u8282 = \u4E00\u4E2A\u4EA4\u4E92\u6A21\u62DF + \u5C11\u91CF\u65C1\u6CE8\uFF1A\u6B63\u6587\u7528 learnhub-interactive \u6807\u8BB0\u5757\u5185\u8054\u5199\u5B8C\u6574\u81EA\u5305\u542B HTML" }
+];
+function parseSectionTitle(title) {
+  const m = title.match(/^(.+?)[:：]\s*(.+)$/);
+  const hit = m ? SECTION_TYPES.find((t) => t.prefix === m[1].trim()) : void 0;
+  if (hit && m) return { type: hit, clean: m[2].trim() };
+  return { type: SECTION_TYPES[0], clean: title.trim() };
+}
 function rendererCapabilityBlock() {
   const out = ["## \u9762\u677F\u652F\u6301\u7684\u6E32\u67D3\u683C\u5F0F\uFF08\u53EA\u80FD\u4F7F\u7528\u4E0B\u5217\u683C\u5F0F\uFF1B\u672A\u5217\u51FA\u7684\u683C\u5F0F\u9762\u677F\u65E0\u6CD5\u6E32\u67D3\uFF0C\u5199\u4E86\u7B49\u4E8E\u6CA1\u5199\uFF09", ""];
   for (const r of RENDERERS) {
     out.push(`- **${r.label}**\uFF1A${r.hint}\u3002\u5199\u6CD5\uFF1A`, "", r.example, "");
   }
   out.push("- **\u56FE\u7247/\u52A8\u753B**\uFF1A`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]`\uFF08\u652F\u6301 png/jpg/webp/gif/svg\uFF0C\u8DEF\u5F84\u76F8\u5BF9 vault \u6839\uFF09", "");
+  out.push(
+    "- **\u4EA4\u4E92\u6A21\u62DF\uFF08\u300C\u4EA4\u4E92\u300D\u8282\u5185\u8054\u521B\u4F5C\uFF09**\uFF1A\u6B63\u6587\u76F4\u63A5\u7528\u6807\u8BB0\u5757\u5199\u5B8C\u6574 HTML\uFF0C\u7CFB\u7EDF\u843D\u76D8\u4E3A\u72EC\u7ACB\u6587\u4EF6\u5E76\u66FF\u6362\u4E3A\u5F15\u7528\u5757\uFF1A",
+    "",
+    "```learnhub-interactive:\u4EA4\u4E92/<\u8BED\u4E49\u5316\u540D\u79F0>.html",
+    "<!DOCTYPE html>\u2026\u5B8C\u6574\u81EA\u5305\u542B HTML\u2026",
+    "```",
+    "",
+    "  \u786C\u6027\u8981\u6C42\uFF1A\u5355\u6587\u4EF6\u81EA\u5305\u542B\uFF08\u5168\u90E8 CSS/JS \u5185\u8054\uFF0C\u7981\u5916\u90E8\u8D44\u6E90\u4E0E\u7F51\u7EDC\u8BF7\u6C42\uFF0C\u56FE\u5F62\u7528 canvas/SVG/DOM \u7ED8\u5236\uFF09\uFF1B\u8FBE\u6210\u6A21\u62DF\u76EE\u6807\u65F6\u7ED3\u5C3E\u4E0A\u62A5 `<script>window.parent.postMessage({type:'LEARNHUB_COMPLETE', score: <0-1 \u6210\u7EE9>, detail: '\u4E00\u53E5\u8BDD\u7ED3\u8BBA'},'*')</script>`\u3002",
+    ""
+  );
   return out.join("\n");
 }
 var PLAIN_CODE_LANGS = /* @__PURE__ */ new Set([
@@ -10663,19 +10883,25 @@ var Content = class _Content {
     for (const p of pres) {
       const fm = state[p];
       if (fm && fm.content.version > 0) {
-        out.push(`- **${p}**\uFF08\u5DF2\u751F\u6210\uFF09\uFF1A\u8BB2\u8FC7\uFF08\u8BE6\u89C1\u5176\u8BFE\u7A0B\u6587\u4EF6\uFF09`);
+        out.push(`- **${p}**\uFF08\u5DF2\u751F\u6210\uFF09\uFF0C\u5B9E\u9645\u6559\u8FC7\u7684\u8282\uFF1A`);
+        const secs = fm.content.sections ?? [];
+        if (secs.length) {
+          for (const s of secs) out.push(`  - ${s.title}${s.points ? `\uFF08${s.points}\uFF09` : ""}`);
+        } else {
+          out.push("  - \uFF08\u8282\u6E05\u5355\u7F3A\u5931\uFF0C\u6309\u8282\u70B9\u540D\u7406\u89E3\u5176\u5185\u5BB9\uFF09");
+        }
       } else {
         const note = graph.noteOf[p];
         out.push(`- **${p}**\uFF08\u672A\u751F\u6210${note ? `\uFF0Cnote\uFF1A${note}` : ""}\uFF09`);
       }
     }
     out.push("");
-    out.push("## 3. \u540E\u7EE7\u9884\u544A\uFF08\u672C\u8BFE\u7ED3\u5C3E\u57CB\u8854\u63A5\u94A9\u5B50\uFF09");
+    out.push("## 3. \u540E\u7EE7\u9884\u544A\uFF08\u5982\u9700\u6536\u5C3E\u8854\u63A5\uFF0C\u53EF\u5728\u81EA\u7136\u7ED3\u675F\u5904\u4E00\u53E5\u8BDD\u5E26\u8FC7\uFF1B\u4E0D\u8BBE\u56FA\u5B9A\u680F\u76EE\uFF09");
     out.push(succs.length ? succs.join("\u3001") : "\uFF08\u65E0\u540E\u7EE7\uFF0C\u7EC8\u70B9\u8282\u70B9\uFF09");
     out.push("");
     out.push("## 4. \u9886\u57DF\u8FB9\u754C");
     const scope = `\u672C\u8BFE\u5C5E\u4E8E${course ? `\u8BFE\u7A0B\u300C${course}\u300D\u7684` : ""}`;
-    out.push(`${scope}\u300C${region} \xB7 ${block}\u300D\u533A\u5757\u3002\u53EA\u8BB2\u672C\u8282\u70B9\u8303\u56F4\u5185\u7684\u5185\u5BB9\uFF1B\u540E\u7EE7\u8282\u70B9\u53EA\u4F5C\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u7684\u4E00\u53E5\u8BDD\u94A9\u5B50\uFF0C\u4E0D\u5C55\u5F00\u3001\u4E0D\u63D0\u524D\u6559\u3002`);
+    out.push(`${scope}\u300C${region} \xB7 ${block}\u300D\u533A\u5757\u3002\u53EA\u8BB2\u672C\u8282\u70B9\u8303\u56F4\u5185\u7684\u5185\u5BB9\uFF1B\u540E\u7EE7\u8282\u70B9\u81F3\u591A\u5728\u81EA\u7136\u6536\u5C3E\u5904\u4E00\u53E5\u8BDD\u5E26\u8FC7\uFF0C\u4E0D\u5C55\u5F00\u3001\u4E0D\u63D0\u524D\u6559\uFF1B\u662F\u5426\u63D0\u53CA\u7531\u4F60\u5224\u65AD\u3002`);
     const forbidden = Object.keys(graph.nset).filter((n) => n !== node && n.length >= 2 && (graph.depth[n] ?? 0) > dSelf).sort((a, b) => (graph.depth[b] ?? 0) - (graph.depth[a] ?? 0)).slice(0, 200);
     out.push("");
     out.push("## 5. \u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\uFF08\u672A\u5B66\uFF0C\u4E0D\u5F97\u51FA\u73B0\u3001\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\uFF09");
@@ -10685,7 +10911,7 @@ var Content = class _Content {
     out.push("- \u522B\u540D\u7EDF\u4E00\u8868\uFF1A\u9E3D\u5DE2\u539F\u7406\uFF08\u975E\u62BD\u5C49\u539F\u7406\uFF09\u3001\u52FE\u80A1\u5B9A\u7406\uFF08\u975E\u6BD5\u8FBE\u54E5\u62C9\u65AF\u5B9A\u7406\uFF09\u3001\u4F59\u5F26\u5B9A\u7406\uFF08\u975E\u963F\u5C14\xB7\u5361\u897F\u5B9A\u7406\uFF09\u2014\u2014\u5B8C\u6574\u8868\u89C1 \u7406\u5FF5\u4E0E\u89C4\u8303.md \xA78");
     out.push("- \u98CE\u683C\uFF1A\u6210\u4EBA\u81EA\u5B66\u8005\uFF1B\u76F4\u89C9\u5148\u4E8E\u4E25\u683C\u3001\u5177\u4F53\u5148\u4E8E\u62BD\u8C61\u3001\u6280\u80FD\u5148\u4E8E\u5F62\u5F0F\u5316");
     out.push(isPractice ? "- \u7BC7\u5E45\uFF1A\u8BF4\u660E\u6587\u5B57 \u2264 400 \u5B57\uFF1B\u6838\u5FC3\u4EA4\u4ED8\u7269\u662F\u4EA4\u4E92\u6A21\u62DF\uFF08\u89C4\u8303\u89C1 \xA78\uFF09" : "- \u7BC7\u5E45\uFF1A\u6B63\u6587 \u2264 2500 \u5B57\uFF1B\u7EC3\u4E60 \u57FA\u7840 2\u20134 / \u53D8\u5F0F 2\u20133 / \u6311\u6218 0\u20132");
-    out.push("- \u5C0F\u8282\uFF1A\u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u6807\u9898\uFF08\u6982\u5FF5\uFF1AX / \u4F8B\u9898\uFF1AX / \u6F14\u793A\uFF1AX / \u5C0F\u7ED3\uFF1AX\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \u627F\u4E0A\u542F\u4E0B\u3001\u5185\u5BB9\u53CD\u9988");
+    out.push("- \u5C0F\u8282\uFF1A\u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u6807\u9898\uFF08\u7C7B\u578B\u83DC\u5355\u89C1\u63D0\u793A\u8BCD\uFF09\uFF1B\u8282\u7684\u5212\u5206\u3001\u987A\u5E8F\u4E0E\u7C7B\u578B\u914D\u6BD4\u5B8C\u5168\u7531\u4F60\u6309\u5185\u5BB9\u4E0E\u98CE\u683C\u5224\u65AD\uFF0C\u4E0D\u8BBE\u56FA\u5B9A\u680F\u76EE\u4E0E\u56FA\u5B9A\u6536\u5C3E\u6BB5\uFF08\u53EF\u9009\u4FDD\u7559 ## \u5185\u5BB9\u53CD\u9988 \u533A\u6536\u96C6\u5B66\u4E60\u8005\u5EFA\u8BAE\uFF09");
     out.push("");
     out.push("## 7. \u65E2\u6709 enc \u8FB9\uFF08\u7EC3\u4E60\u5FC5\u987B\u771F\u5B9E\u8C03\u7528\u5B83\u4EEC\uFF09");
     out.push(enc.length ? enc.map(([t, w]) => `${t}(w=${w.toFixed(1)})`).join("\u3001") : "\uFF08\u6682\u65E0\uFF09");
@@ -10702,7 +10928,9 @@ var Content = class _Content {
     return out.join("\n") + "\n";
   }
   // ---- 提示词模板 ----
-  /** practice 节点交互件创作规范（注入上下文包 §8；契约吸收 OpenMAIC simulation 生成经验）。 */
+  /** practice/交互节交互件创作规范（注入上下文包 §8；契约吸收 OpenMAIC 五类交互场景模板经验）。
+   * 面板经 /vendor 同源伺服 katex/three（沙箱 CSP 放开 'self'）；交互件内公式由伺服端自动注入
+   * KaTeX 渲染（直接写 $…$/$$…$$）；类型菜单与 widget-config 契约见 shared INTERACTIVE_TYPES。 */
   static interactiveSpecBlock() {
     return `### \u4EA4\u4E92\u6A21\u62DF\u521B\u4F5C\u89C4\u8303\uFF08\u672C\u8282\u70B9\u7684\u6838\u5FC3\u4EA4\u4ED8\u7269\uFF09
 
@@ -10713,78 +10941,131 @@ var Content = class _Content {
 ...\uFF08\u5B8C\u6574 HTML\uFF09
 \`\`\`
 
-\u786C\u6027\u8981\u6C42\uFF1A
-1. \u5355\u6587\u4EF6\u81EA\u5305\u542B\uFF1A\u5168\u90E8 CSS/JS \u5185\u8054\uFF1B\u7981\u6B62\u5916\u90E8 CDN\u3001\u7F51\u7EDC\u8BF7\u6C42\u4E0E\u56FE\u7247\uFF08\u6C99\u7BB1\u5185\u4E0D\u53EF\u52A0\u8F7D\uFF09\u2014\u2014\u56FE\u5F62\u4E00\u5F8B canvas/SVG/DOM \u7ED8\u5236\u3002
-2. \u53D8\u91CF\u4E0E\u9884\u8BBE\uFF1A\u81F3\u5C11 2 \u4E2A\u53EF\u8C03\u53D8\u91CF\uFF08\u6ED1\u6746\uFF09\uFF0C\u22652 \u4E2A\u9884\u8BBE\u6309\u94AE\uFF1B\u5E94\u7528\u9884\u8BBE\u5FC5\u987B\u5B8C\u6574\u590D\u4F4D\u6A21\u62DF\u540E\u518D\u8FD0\u884C\u3002
-3. \u72B6\u6001\u673A\u6E05\u6670\uFF1Arunning/paused/ended \u4E09\u6001\u5206\u79BB\uFF1Breset \u6309\u94AE\u590D\u4F4D**\u6240\u6709**\u72B6\u6001\u53D8\u91CF\uFF1B\u6309\u94AE\u6587\u6848\u4E0E\u70B9\u51FB\u540E\u7684\u52A8\u4F5C\u4E00\u81F4\uFF08\u542F\u52A8/\u6682\u505C/\u7EE7\u7EED/\u91CD\u65B0\u5F00\u59CB\uFF09\u3002
-4. \u52A8\u753B\u5FC5\u987B\u8089\u773C\u53EF\u89C1\uFF1A\u542F\u52A8\u540E\u5BF9\u8C61\u660E\u663E\u79FB\u52A8/\u65CB\u8F6C/\u53D8\u5316\uFF08requestAnimationFrame\uFF09\uFF0C\u8BA9\u5B66\u4E60\u8005\u4E00\u773C\u786E\u8BA4\u300C\u5728\u52A8\u300D\u3002
-5. \u79FB\u52A8\u7AEF\u53CB\u597D\uFF1A\u63A7\u5236\u533A\u4E0E\u753B\u5E03\u4E0A\u4E0B\u5806\u53E0\u4E0D\u91CD\u53E0\uFF08320px \u5BBD\u53EF\u6D4B\u8BD5\uFF09\uFF1B\u89E6\u63A7\u76EE\u6807 \u226544px\uFF1Bcanvas \u7528 ResizeObserver \u81EA\u9002\u5E94\u5BB9\u5668\u3002
-6. \u5B9E\u65F6\u6570\u636E\uFF1A\u5173\u952E\u6570\u503C\u7528\u7B49\u5BBD\u5B57\u4F53\u663E\u793A\u5E76\u5E26\u5355\u4F4D\uFF1B\u7ED3\u675F\u65F6\u7ED9\u51FA\u6210\u8D25/\u7ED3\u8BBA\u53CD\u9988\u3002
-7. \u5B8C\u6210\u4E0A\u62A5\uFF1A\u5728\u6587\u6863\u672B\u5C3E\u52A0
-   \`<script>window.parent.postMessage({type:'LEARNHUB_COMPLETE'}, '*')</script>\`
-   \uFF08\u5B66\u4E60\u8005\u70B9\u51FB\u300C\u5B8C\u6210\u6F14\u793A\u300D\u6216\u8FBE\u6210\u6A21\u62DF\u76EE\u6807\u65F6\u89E6\u53D1\uFF09\u3002
-8. \u65E0\u969C\u788D\uFF1A\u63A7\u4EF6\u52A0 ARIA \u6807\u7B7E\uFF1B\u753B\u5E03\u6587\u5B57\u9AD8\u5BF9\u6BD4\u3002
+## \u5FC5\u5907\u5951\u7EA6\uFF08\u6BCF\u7C7B\u4EA4\u4E92\u4EF6\u90FD\u8981\u6EE1\u8DB3\uFF09
+
+1. **widget-config \u5FC5\u586B**\uFF1A<head> \u5185\u5D4C\u7ED3\u6784\u5316\u5143\u6570\u636E\uFF0C\u9762\u677F\u636E\u6B64\u8BC6\u522B\u7C7B\u578B\u2014\u2014
+   \`<script type="application/json" id="widget-config">{ "type": "<\u7C7B\u578B>", "description": "\u4E00\u53E5\u8BDD\u8BF4\u660E", "variables": [{ "name": "angle", "label": "\u89D2\u5EA6", "min": 0, "max": 90, "default": 45, "unit": "\xB0" }], "presets": [{ "name": "\u9884\u8BBE\u540D", "state": { "angle": 30 } }] }</script>\`
+2. **\u5B8C\u6210\u4E0A\u62A5**\uFF1A\u8FBE\u6210\u6A21\u62DF\u76EE\u6807\u65F6\u5728\u6587\u6863\u672B\u5C3E\u52A0
+   \`<script>window.parent.postMessage({type:'LEARNHUB_COMPLETE', score: <0-1 \u53EF\u9009\u6210\u7EE9>, detail: '\u4E00\u53E5\u8BDD\u7ED3\u8BBA'}, '*')</script>\`
+3. **AI \u8001\u5E08\u64CD\u4F5C\u63A5\u53E3**\uFF08\u5FC5\u987B\u5B9E\u73B0\uFF1B\u9762\u677F\u300C\u95EE AI \u8001\u5E08\u300D\u4F1A\u5E7F\u64AD LEARNHUB_TEACHER \u6D88\u606F\u9A71\u52A8\u4EA4\u4E92\u4EF6\u6F14\u793A\uFF09\u2014\u2014\u628A\u4E0B\u9762\u6837\u677F\u539F\u6837\u653E\u8FDB\u4F60\u7684 <script>\uFF1A
+   \`window.addEventListener('message', function (e) { if (!e.data || e.data.type !== 'LEARNHUB_TEACHER') return; switch (e.data.action) { case 'highlight': { /* e.data.selector \u9AD8\u4EAE\u8BE5\u5143\u7D20 3s */ break } case 'setState': { /* e.data.state: {\u53D8\u91CF\u540D: \u503C} \u5E94\u7528\u5230\u6A21\u62DF */ break } case 'reveal': { /* e.data.selector \u663E\u793A\u9690\u85CF\u5143\u7D20 */ break } case 'annotate': { /* e.data.text \u9876\u90E8\u6279\u6CE8\u6C14\u6CE1 4s */ break } } })\`
+   selector \u7528 CSS \u9009\u62E9\u5668\uFF08\u5982 '#angle-slider'\u3001'#canvas'\uFF09\uFF1B\u6BCF\u4E2A case \u5FC5\u987B\u7528\u5757\u4F5C\u7528\u57DF {} \u5305\u88F9\uFF08\u9632\u91CD\u58F0\u660E SyntaxError\uFF09\u3002
+4. **\u5355\u6587\u4EF6\u81EA\u5305\u542B**\uFF1A\u5168\u90E8 CSS/JS \u5185\u8054\uFF1B\u7981\u6B62\u5916\u90E8 CDN \u4E0E\u7F51\u7EDC\u8BF7\u6C42\u3002\u6C99\u7BB1\u53EA\u653E\u884C\u540C\u6E90 /learnhub/api/vendor/ \u4E0B\u7684 katex \u4E0E three \u5E93\uFF08\u5199\u6CD5\u89C1 visualization3d\uFF09\uFF1B\u516C\u5F0F\u76F4\u63A5\u5199 $\u2026$/$$\u2026$$\uFF0C\u4F3A\u670D\u7AEF\u81EA\u52A8\u6CE8\u5165 KaTeX \u6E32\u67D3\uFF0C\u65E0\u9700\u624B\u5199\u6E32\u67D3\u4EE3\u7801\u3002
+5. **\u72B6\u6001\u673A\u6E05\u6670**\uFF1Arunning/paused/ended \u4E09\u6001\u5206\u79BB\uFF1Breset \u590D\u4F4D**\u6240\u6709**\u72B6\u6001\u53D8\u91CF\uFF1B\u6309\u94AE\u6587\u6848\u4E0E\u70B9\u51FB\u540E\u7684\u52A8\u4F5C\u4E00\u81F4\uFF08\u542F\u52A8/\u6682\u505C/\u7EE7\u7EED/\u91CD\u65B0\u5F00\u59CB\uFF09\u3002
+6. **\u52A8\u753B\u5FC5\u987B\u8089\u773C\u53EF\u89C1**\uFF1A\u542F\u52A8\u540E\u5BF9\u8C61\u660E\u663E\u79FB\u52A8/\u65CB\u8F6C/\u53D8\u5316\uFF08requestAnimationFrame\uFF09\uFF0C\u8BA9\u5B66\u4E60\u8005\u4E00\u773C\u786E\u8BA4\u300C\u5728\u52A8\u300D\u3002
+7. **\u79FB\u52A8\u7AEF\u53CB\u597D**\uFF1A\u63A7\u5236\u533A\u4E0E\u753B\u5E03\u4E0A\u4E0B\u5806\u53E0\u4E0D\u91CD\u53E0\uFF08320px \u53EF\u7528\uFF09\uFF1B\u89E6\u63A7\u76EE\u6807 \u226544px\uFF1Bcanvas \u7528 ResizeObserver \u81EA\u9002\u5E94\u5BB9\u5668\u3002
+8. **\u5B9E\u65F6\u6570\u636E**\u7B49\u5BBD\u5B57\u4F53\u663E\u793A\u5E76\u5E26\u5355\u4F4D\uFF1B\u63A7\u4EF6\u52A0 ARIA \u6807\u7B7E\uFF1B\u753B\u5E03\u6587\u5B57\u9AD8\u5BF9\u6BD4\u3002
+
+## \u7C7B\u578B\u83DC\u5355\uFF08widget-config \u7684 type\uFF0C\u6309\u5185\u5BB9\u9009\u4E00\u4E2A\uFF09
+
+- **simulation**\uFF1A\u8FC7\u7A0B\u4EFF\u771F\uFF08\u7269\u7406/\u5316\u5B66/\u7ECF\u6D4E/\u7B97\u6CD5\u2026\uFF09\u3002\u22652 \u4E2A\u53D8\u91CF\u6ED1\u6746 + \u22652 \u4E2A\u9884\u8BBE\u6309\u94AE\uFF1B\u5E94\u7528\u9884\u8BBE\u5B8C\u6574\u590D\u4F4D\u540E\u8FD0\u884C\uFF1B\u7ED3\u675F\u65F6\u7ED9\u6210\u8D25/\u7ED3\u8BBA\u53CD\u9988\u3002
+- **visualization3d**\uFF1A3D \u53EF\u89C6\u5316\uFF08\u51E0\u4F55\u4F53/\u5206\u5B50/\u5929\u4F53/\u7ED3\u6784\u2026\uFF09\u3002\u7528 vendored three\uFF08\u7981\u6B62 CDN\uFF09\uFF1A
+  \`<script type="importmap">{ "imports": { "three": "/learnhub/api/vendor/three/build/three.module.js", "three/addons/": "/learnhub/api/vendor/three/examples/jsm/" } }</script>\`
+  \u7136\u540E \`import * as THREE from 'three'\`\u3001\`import { OrbitControls } from 'three/addons/controls/OrbitControls.js'\`\u3002
+  \u80CC\u666F\u4E0D\u7528\u7EAF\u9ED1\uFF08\u5982 #0a0a1a\uFF09\uFF1B\u73AF\u5883\u5149 \u22650.5 + \u534A\u7403\u5149 + \u4E3B\u5E73\u884C\u5149\u8BA9\u7269\u4F53\u6E05\u6670\u53EF\u89C1\uFF1B\u5FC5\u987B\u7ED9\u653E\u5927/\u7F29\u5C0F\u6309\u94AE\uFF08\u79FB\u52A8\u7AEF\u65E0\u6EDA\u8F6E\uFF09\uFF1BWebGL \u68C0\u6D4B\u5931\u8D25\u663E\u793A\u964D\u7EA7\u63D0\u793A\u3002
+- **diagram**\uFF1A\u53EF\u64CD\u4F5C\u56FE\u89E3\uFF08\u601D\u7EF4\u5BFC\u56FE/\u6D41\u7A0B/\u5173\u7CFB\u56FE\u2026\uFF09\u3002\u8282\u70B9\u53EF\u70B9\u51FB\u5C55\u5F00\u7EC6\u8282\uFF0C\u652F\u6301\u589E\u5220/\u8FDE\u7EBF\u66F4\u4F73\u3002
+- **game**\uFF1A\u77E5\u8BC6\u5C0F\u6E38\u620F\uFF08\u5206\u7C7B/\u7ADE\u901F/\u62FC\u56FE\u2026\uFF09\u3002\u89C4\u5219 30 \u79D2\u5185\u53EF\u61C2\uFF1B\u8BA1\u5206\u4E0E LEARNHUB_COMPLETE \u7684 score \u4E0A\u62A5\u7ED1\u5B9A\u3002
+- **code**\uFF1A\u5728\u7EBF\u7F16\u7A0B\uFF08\u7EAF JS\uFF0C\u4E0D\u5F15\u5916\u90E8\u8FD0\u884C\u65F6\uFF09\u3002\u4EE3\u7801\u7F16\u8F91\u5668 + \u8FD0\u884C\u6309\u94AE + \u8F93\u51FA\u9762\u677F\uFF1B\u7528\u6237\u4EE3\u7801\u5728 Web Worker \u6216 new Function \u5185\u6267\u884C\uFF08\u9632\u6B7B\u5FAA\u73AF\u5361 UI\uFF09\uFF1B\u9884\u7F6E 2-3 \u4E2A\u4EFB\u52A1\u4E0E\u53EF\u8FD0\u884C\u793A\u4F8B\u3002
+
+## \u8F93\u51FA\u683C\u5F0F
+
+\u53EA\u8F93\u51FA\u4E00\u4E2A\u5B8C\u6574 HTML \u6587\u6863\uFF08\u6070\u597D\u4E00\u4E2A <!DOCTYPE html> \u4E0E\u4E00\u4E2A </html>\uFF09\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002
 \u8BF4\u660E\u6587\u5B57\uFF08\u4E0A\u4E0B\u6587\u5305\u6B63\u6587\uFF09\u53EA\u505A\u5BFC\u89C8\uFF1A\u770B\u4EC0\u4E48\u3001\u8C03\u4EC0\u4E48\u3001\u89C2\u5BDF\u4EC0\u4E48\u89C4\u5F8B\uFF0C\u2264 400 \u5B57\u3002`;
   }
   static PROMPT_KINDS = {
-    \u8BFE\u7A0B\u751F\u6210: `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+    // 风格变体作用于「课程节生成」（课程节生成-<风格>）；整课版「课程生成*」已随
+    // 大纲→逐节管线退役——旧 vault 快照文件不再被读取，可手工清理。
+    \u8BFE\u7A0B\u5927\u7EB2: `<!-- learnhub:prompt/v5 -->
+# \u8BFE\u7A0B\u5927\u7EB2\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
 
-\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8BFE\u7A0B\u5199\u624B\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u4E3A\u300C\u76EE\u6807\u8282\u70B9\u300D\u5199\u4E00\u8282\u8BFE\u7A0B\u7B14\u8BB0\u3002
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8BFE\u7A0B\u8BBE\u8BA1\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u628A\u76EE\u6807\u8282\u70B9\u7684\u4E00\u8BFE\u62C6\u6210\u4F9D\u6B21\u5B66\u4E60\u7684\u300C\u8282\u300D\u6E05\u5355\uFF1B\u6BCF\u8282\u4E4B\u540E\u4F1A\u5355\u72EC\u751F\u6210\u6B63\u6587\u3002
+
+## \u8BBE\u8BA1\u539F\u5219
+
+1. \u8282\u7684\u5212\u5206\u3001\u6570\u91CF\u3001\u987A\u5E8F\u4E0E\u7C7B\u578B\u914D\u6BD4\u5B8C\u5168\u7531\u4F60\u6839\u636E\u8BFE\u7A0B\u5185\u5BB9\u3001\u4E3B\u9898\u4E0E\u8BB2\u89E3\u98CE\u683C\u5224\u65AD\uFF0C\u9009\u62E9\u6700\u81EA\u7136\u7684\u8BB2\u89E3\u9AA8\u67B6\uFF1A\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\uFF0C\u4E0D\u8BBE\u56FA\u5B9A\u6536\u5C3E\u6BB5\uFF08\u65E0\u5F3A\u5236\u7684\u8FC7\u6E21\u8282/\u603B\u7ED3\u8282\uFF09\u3002
+2. \u4E00\u8282 = \u4E00\u4E2A\u53EF\u5B8C\u6210\u7684\u5B66\u4E60\u5355\u5143\uFF08\u4E00\u4E2A\u6982\u5FF5\u3001\u4E00\u9053\u4F8B\u9898\u3001\u4E00\u6B21\u6F14\u793A\u3001\u4E00\u6B21\u52A8\u624B\u7EC3\u4E60\u6216\u4E00\u4E2A\u4EA4\u4E92\u6A21\u62DF\uFF09\uFF1B\u6807\u9898\u63CF\u8FF0\u672C\u8282\u5177\u4F53\u5185\u5BB9\uFF0C\u4E0D\u7528\u680F\u76EE\u5316\u901A\u540D\uFF1B\u4E00\u8282 = \u5B66\u4E60\u9875 1\u20132 \u5C4F\u2014\u2014\u4E00\u4E2A\u77E5\u8BC6\u70B9\u9700\u8981 \u516C\u5F0F+\u63A8\u5BFC+\u4F8B\u9898+\u56FE \u624D\u80FD\u8BB2\u5B8C\u65F6\u62C6\u6210\u591A\u4E2A\u8282\uFF1B\u8282\u5185\u4E0D\u5141\u8BB8\u518D\u5206\u5C0F\u8282\uFF08### \u5B50\u6807\u9898\u4F1A\u88AB\u8D28\u68C0\u95E8\u62D2\u7EDD\uFF09\u3002
+3. type \u4ECE\u8282\u7C7B\u578B\u83DC\u5355\u9009\uFF08\u6982\u5FF5/\u4F8B\u9898/\u6F14\u793A/\u5C0F\u7ED3/\u7EC3\u4E60/\u4EA4\u4E92\uFF09\uFF1B\u7EC3\u4E60\u8282\u53EF\u9009\uFF08\u6574\u8BFE\u53EF\u4EE5\u6CA1\u6709\u7EC3\u4E60\u8282\uFF09\uFF1B\u8282\u7C7B\u578B\u914D\u6BD4\u6309\u5185\u5BB9\u9009\u7EC4\u5408\u6A21\u5F0F\uFF0C\u4F8B\u5982\uFF1A\u8FDE\u7EED 2\u20133 \u4E2A\u6982\u5FF5\u8282\u540E\u8DDF\u4E00\u4E2A\u7EC3\u4E60\u8282\u96C6\u4E2D\u7EC3\u3001\u6982\u5FF5-\u6F14\u793A\u7A7F\u63D2\u3001\u5168\u6982\u5FF5\u65E0\u7EC3\u4E60\u8282\u2014\u2014\u4E0D\u8981\u673A\u68B0\u5730\u4E00\u8282\u5185\u5BB9\u8DDF\u4E00\u8282\u7EC3\u4E60\u3002
+4. \u901A\u5E38 3\u20138 \u8282\uFF0C\u53EF\u6309\u5185\u5BB9\u589E\u51CF\uFF1B\u76F8\u90BB\u8282\u4E4B\u95F4\u8981\u6709\u5B66\u4E60\u4E0A\u7684\u9012\u8FDB\u5173\u7CFB\uFF08\u9010\u8282\u751F\u6210\u65F6\u4F1A\u6CE8\u5165\u524D\u8282\u5DF2\u751F\u6210\u6B63\u6587\u4FDD\u8BC1\u8FDE\u8D2F\uFF09\u3002
+
+## \u8F93\u51FA
+
+\u53EA\u8F93\u51FA\u4E00\u4E2A YAML \u6587\u6863\uFF08\u4E0D\u8981\u4EE3\u7801\u56F4\u680F\u3001\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\uFF09\uFF0C\u7ED3\u6784\u5982\u4E0B\uFF1A
+
+node: <\u8282\u70B9\u540D>
+sections:
+  - id: s1
+    title: \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C
+    type: \u6982\u5FF5
+    points: \u672C\u8282\u8981\u70B9\uFF08\u4E00\u53E5\u8BDD\uFF09
+    visual: \u516C\u5F0F|mermaid|\u56FE\u7247|\u4EA4\u4E92|\u793A\u610F\u56FE|\u51FD\u6570\u56FE|\u56FE\u8868 \u4E4B\u4E00\uFF08\u672C\u8282\u7684\u8BB2\u89E3\u4E3B\u4F53\u53EF\u89C6\u5316\u2014\u2014\u5B66\u4E60\u9875\u6587\u5B57\u5B9C\u5C11\u3001\u516C\u5F0F/\u56FE/\u4EA4\u4E92\u5B9C\u591A\uFF0C\u51E0\u4E4E\u6BCF\u8282\u90FD\u6709\uFF0C\u786E\u65E0\u624D\u5199\u300C\u65E0\u300D\uFF1B\u793A\u610F\u56FE=\`\`\`svg\u3001\u51FD\u6570\u56FE=\`\`\`plot\u3001\u56FE\u8868=\`\`\`chart\uFF09
+`,
+    \u8BFE\u7A0B\u8282\u751F\u6210: `<!-- learnhub:prompt/v5 -->
+# \u8BFE\u7A0B\u8282\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u7CFB\u7EDF\u9644\u4E0A\uFF1A\u8282\u6E05\u5355\u3001\u672C\u8282\u4EFB\u52A1\u3001\u524D\u8282\u5DF2\u751F\u6210\u6B63\u6587\u3001\u4E0A\u4E0B\u6587\u5305\uFF09
+
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8BFE\u7A0B\u5199\u624B\u3002\u6839\u636E\u9644\u540E\u7684\u6750\u6599\uFF0C\u53EA\u5199\u300C\u672C\u8282\u4EFB\u52A1\u300D\u6307\u5B9A\u7684\u8FD9\u4E00\u8282\u6B63\u6587\u3002
 
 ## \u786C\u7EA6\u675F\uFF08\u8FDD\u53CD\u5373\u8FD4\u5DE5\uFF09
 
-1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
-2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
-3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\u3001\`## \u4F8B\u9898\uFF1A\u5224\u65AD\u4E00\u4E2A\u6570\u5C5E\u4E8E\u54EA\u7C7B\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
-4. \u5C0F\u8282\u6807\u9898\u63CF\u8FF0\u672C\u8282\u7684\u5177\u4F53\u5185\u5BB9\uFF0C\u4E0D\u7528\u680F\u76EE\u5316\u901A\u540D\uFF08\u5982\u300C\u4E3A\u4EC0\u4E48\u9700\u8981\u5B83\u300D\u300C\u5B9A\u4E49\u4E0E\u6027\u8D28\u300D\u300C\u5E38\u89C1\u8BEF\u533A\u300D\uFF09\uFF1B\u5F00\u7BC7\u5207\u5165\u968F\u5185\u5BB9\u9009\u62E9\u2014\u2014\u573A\u666F\u3001\u95EE\u9898\u3001\u5BF9\u6BD4\u3001\u4EE3\u7801\u3001\u76F4\u63A5\u5B9A\u4E49\u7686\u53EF\uFF0C\u52A8\u673A\u878D\u8FDB\u884C\u6587\uFF0C\u4E0D\u8BBE\u52A8\u673A\u680F\u76EE\u3002
-5. \u8282\u7684\u539F\u5B50\u6027\uFF1A\u4E00\u8282\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF0C\u6587\u5B57\u7CBE\u70BC\uFF08\u2264300 \u5B57\uFF09\uFF1B\u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\uFF08dual-coding\uFF1A\u53EF\u89C6\u5316\u4E0E\u6587\u5B57\u4E92\u76F8\u8865\u5145\uFF0C\u4E0D\u662F\u88C5\u9970\uFF09\u3002
-6. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+1. \u53EA\u8F93\u51FA\u4E00\u8282\uFF1A\u4EE5 \`## \u7C7B\u578B\uFF1A\u6807\u9898\` \u5F00\u5934\uFF08\u6807\u9898\u4E0E\u7C7B\u578B\u7CBE\u786E\u7167\u6284\u672C\u8282\u4EFB\u52A1\uFF09\uFF0C\u540E\u63A5\u672C\u8282\u6B63\u6587\uFF1B\u4E0D\u5199\u5176\u4ED6\u8282\u3001\u4E0D\u5199 frontmatter\u3002
+2. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
+3. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u5185\u5BB9\u81F3\u591A\u5728\u81EA\u7136\u6536\u5C3E\u5904\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
+4. \u53EF\u89C6\u5316\u4E3A\u4E3B\u3001\u6587\u5B57\u4E3A\u8F85\uFF1A\u8BB2\u89E3\u672C\u4F53\u7528\u516C\u5F0F/mermaid \u56FE/svg \u793A\u610F\u56FE/plot \u51FD\u6570\u56FE/chart \u56FE\u8868/\u4EA4\u4E92\u4EF6\u627F\u8F7D\uFF0C\u6587\u5B57\u53EA\u505A\u5F15\u5BFC\u4E0E\u8854\u63A5\uFF08\u2264150 \u5B57\uFF09\uFF0C\u4E0D\u5199\u5927\u6BB5\u89E3\u8BF4\uFF1B\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\uFF08\u4EA4\u4E92\u8282\u4E3A\u4EA4\u4E92\u4EF6\u672C\u8EAB\uFF09\uFF1B\u8282\u5185\u4E0D\u5199 ### \u5B50\u6807\u9898\uFF1B\u4E0D\u5728\u6B63\u6587\u81EA\u8BBE\u7EC3\u4E60/\u8D81\u70ED\u7EC3\u4E60\u73AF\u8282\u2014\u2014\u7EC3\u4E60\u7531\u9898\u5E93\u4E0E\u7EC3\u4E60\u8282\u627F\u8F7D\u3002
+5. \u4E0E\u300C\u524D\u4E00\u8282\u5DF2\u751F\u6210\u6B63\u6587\u300D\u81EA\u7136\u8854\u63A5\uFF1A\u4E0D\u91CD\u590D\u5B83\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u5F00\u5934\u4E0D\u590D\u8FF0\u524D\u8282\u7ED3\u8BBA\u3002
+6. \u6392\u7248\u7EA6\u5B9A\uFF1A\u5E76\u5217\u7684\u8BEF\u533A/\u6CE8\u610F/\u8981\u70B9\u5757\u7528 blockquote\uFF08> \u9996\u884C\u52A0\u7C97\u6807\u7B7E\uFF09\uFF1B\u5173\u952E\u7ED3\u8BBA\u7528\u72EC\u7ACB\u516C\u5F0F\uFF08$$\u2026$$\uFF09\uFF1Bmermaid \u8282\u70B9/\u8FB9\u6587\u672C\u542B | { } " # \u7B49\u7279\u6B8A\u5B57\u7B26\u65F6\u5FC5\u987B\u6574\u4F53\u53CC\u5F15\u53F7\u5305\u88F9\uFF08\u5982 \`A["\u6587\u672C"]\`\uFF09\uFF0C\u5426\u5219\u6E32\u67D3\u964D\u7EA7\u4E3A\u6E90\u7801\u3002
+7. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\u3002
 
 {{renderers}}
 
 ## \u8F93\u51FA
 
-\u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
+\u53EA\u8F93\u51FA\u672C\u8282\u6B63\u6587\uFF08## \u6807\u9898 + \u5185\u5BB9\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
 `,
-    "\u8BFE\u7A0B\u751F\u6210-\u82CF\u683C\u62C9\u5E95": `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u82CF\u683C\u62C9\u5E95\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+    "\u8BFE\u7A0B\u8282\u751F\u6210-\u82CF\u683C\u62C9\u5E95": `<!-- learnhub:prompt/v5 -->
+# \u8BFE\u7A0B\u8282\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u82CF\u683C\u62C9\u5E95\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u7CFB\u7EDF\u9644\u4E0A\uFF1A\u8282\u6E05\u5355\u3001\u672C\u8282\u4EFB\u52A1\u3001\u524D\u8282\u5DF2\u751F\u6210\u6B63\u6587\u3001\u4E0A\u4E0B\u6587\u5305\uFF09
 
-\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u82CF\u683C\u62C9\u5E95\u5F0F\u5BFC\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u4E3A\u300C\u76EE\u6807\u8282\u70B9\u300D\u5199\u4E00\u8282\u4EE5\u5F15\u5BFC\u63D0\u95EE\u4E3A\u4E3B\u7EBF\u7684\u8BFE\u7A0B\u7B14\u8BB0\uFF1A\u5C11\u7ED9\u7ED3\u8BBA\uFF0C\u591A\u7ED9\u300C\u597D\u95EE\u9898 + \u9010\u6B65\u903C\u8FD1\u7684\u601D\u8DEF\u300D\uFF0C\u8BA9\u5B66\u4E60\u8005\u5728\u56DE\u7B54\u95EE\u9898\u4E2D\u81EA\u5DF1\u5EFA\u6784\u77E5\u8BC6\u3002
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u82CF\u683C\u62C9\u5E95\u5F0F\u5BFC\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u6750\u6599\uFF0C\u53EA\u5199\u300C\u672C\u8282\u4EFB\u52A1\u300D\u6307\u5B9A\u7684\u8FD9\u4E00\u8282\u6B63\u6587\uFF1A\u5C11\u7ED9\u7ED3\u8BBA\uFF0C\u591A\u7ED9\u300C\u597D\u95EE\u9898 + \u9010\u6B65\u903C\u8FD1\u7684\u601D\u8DEF\u300D\uFF0C\u8BA9\u5B66\u4E60\u8005\u5728\u56DE\u7B54\u95EE\u9898\u4E2D\u81EA\u5DF1\u5EFA\u6784\u77E5\u8BC6\u3002
 
 ## \u786C\u7EA6\u675F\uFF08\u8FDD\u53CD\u5373\u8FD4\u5DE5\uFF09
 
-1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
-2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
-3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
-4. \u8282\u7684\u539F\u5B50\u6027\uFF1A\u4E00\u8282\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF1B\u6BCF\u4E2A\u300C\u6982\u5FF5\u300D\u8282\u81F3\u5C11 2 \u4E2A\u9636\u68AF\u5F0F\u5F15\u5BFC\u95EE\u9898\uFF08\u5148\u5177\u4F53\u540E\u62BD\u8C61\uFF09\uFF0C\u95EE\u9898\u540E\u7D27\u8DDF\u300C\u951A\u70B9\u300D\u2014\u2014\u4E00\u4E24\u53E5\u6700\u4F4E\u9650\u5EA6\u7684\u6B63\u786E\u65B9\u5411\u63D0\u793A\uFF08\u4E0D\u662F\u7B54\u6848\uFF09\u3002
-5. \u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\u3002
-6. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+1. \u53EA\u8F93\u51FA\u4E00\u8282\uFF1A\u4EE5 \`## \u7C7B\u578B\uFF1A\u6807\u9898\` \u5F00\u5934\uFF08\u6807\u9898\u4E0E\u7C7B\u578B\u7CBE\u786E\u7167\u6284\u672C\u8282\u4EFB\u52A1\uFF09\uFF0C\u540E\u63A5\u672C\u8282\u6B63\u6587\uFF1B\u4E0D\u5199\u5176\u4ED6\u8282\u3001\u4E0D\u5199 frontmatter\u3002
+2. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
+3. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u5185\u5BB9\u81F3\u591A\u5728\u81EA\u7136\u6536\u5C3E\u5904\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
+4. \u53EF\u89C6\u5316\u4E3A\u4E3B\u3001\u6587\u5B57\u4E3A\u8F85\uFF1A\u8BB2\u89E3\u672C\u4F53\u7528\u516C\u5F0F/mermaid \u56FE/svg \u793A\u610F\u56FE/plot \u51FD\u6570\u56FE/chart \u56FE\u8868/\u4EA4\u4E92\u4EF6\u627F\u8F7D\uFF0C\u6587\u5B57\u53EA\u505A\u5F15\u5BFC\u4E0E\u8854\u63A5\uFF08\u2264150 \u5B57\uFF09\uFF0C\u4E0D\u5199\u5927\u6BB5\u89E3\u8BF4\uFF1B\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\uFF08\u4EA4\u4E92\u8282\u4E3A\u4EA4\u4E92\u4EF6\u672C\u8EAB\uFF09\uFF1B\u8282\u5185\u4E0D\u5199 ### \u5B50\u6807\u9898\uFF1B\u4E0D\u5728\u6B63\u6587\u81EA\u8BBE\u7EC3\u4E60/\u8D81\u70ED\u7EC3\u4E60\u73AF\u8282\u2014\u2014\u7EC3\u4E60\u7531\u9898\u5E93\u4E0E\u7EC3\u4E60\u8282\u627F\u8F7D\u3002
+5. \u98CE\u683C\u7EA6\u675F\uFF1A\u4EE5\u5F15\u5BFC\u95EE\u9898\u63A8\u8FDB\u2014\u2014\u5148\u7ED9\u89C2\u5BDF/\u53CD\u4F8B\u5F0F\u597D\u95EE\u9898\uFF0C\u518D\u4E00\u5C0F\u6B65\u903C\u8FD1\uFF0C\u95EE\u9898\u540E\u7D27\u8DDF\u300C\u951A\u70B9\u300D\uFF08\u4E00\u4E24\u53E5\u6700\u4F4E\u9650\u5EA6\u7684\u6B63\u786E\u65B9\u5411\u63D0\u793A\uFF0C\u4E0D\u662F\u7B54\u6848\uFF09\uFF1B\u7ED3\u8BBA\u53EA\u5728\u95EE\u9898\u94FE\u8D70\u5B8C\u540E\u7ED9\u51FA\u3002
+6. \u4E0E\u300C\u524D\u4E00\u8282\u5DF2\u751F\u6210\u6B63\u6587\u300D\u81EA\u7136\u8854\u63A5\uFF1A\u4E0D\u91CD\u590D\u5B83\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u5F00\u5934\u4E0D\u590D\u8FF0\u524D\u8282\u7ED3\u8BBA\u3002
+7. \u6392\u7248\u7EA6\u5B9A\uFF1A\u5E76\u5217\u7684\u8BEF\u533A/\u6CE8\u610F/\u8981\u70B9\u5757\u7528 blockquote\uFF08> \u9996\u884C\u52A0\u7C97\u6807\u7B7E\uFF09\uFF1B\u5173\u952E\u7ED3\u8BBA\u7528\u72EC\u7ACB\u516C\u5F0F\uFF08$$\u2026$$\uFF09\uFF1Bmermaid \u8282\u70B9/\u8FB9\u6587\u672C\u542B | { } " # \u7B49\u7279\u6B8A\u5B57\u7B26\u65F6\u5FC5\u987B\u6574\u4F53\u53CC\u5F15\u53F7\u5305\u88F9\uFF08\u5982 \`A["\u6587\u672C"]\`\uFF09\uFF0C\u5426\u5219\u6E32\u67D3\u964D\u7EA7\u4E3A\u6E90\u7801\u3002
+8. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\u3002
 
 {{renderers}}
 
 ## \u8F93\u51FA
 
-\u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
+\u53EA\u8F93\u51FA\u672C\u8282\u6B63\u6587\uFF08## \u6807\u9898 + \u5185\u5BB9\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
 `,
-    "\u8BFE\u7A0B\u751F\u6210-\u8D39\u66FC": `# \u8BFE\u7A0B\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u8D39\u66FC\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u751F\u6210\u65F6\u4E0A\u4E0B\u6587\u5305\u81EA\u52A8\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+    "\u8BFE\u7A0B\u8282\u751F\u6210-\u8D39\u66FC": `<!-- learnhub:prompt/v5 -->
+# \u8BFE\u7A0B\u8282\u751F\u6210\u63D0\u793A\u8BCD\u2014\u2014\u8D39\u66FC\u98CE\u683C\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u7CFB\u7EDF\u9644\u4E0A\uFF1A\u8282\u6E05\u5355\u3001\u672C\u8282\u4EFB\u52A1\u3001\u524D\u8282\u5DF2\u751F\u6210\u6B63\u6587\u3001\u4E0A\u4E0B\u6587\u5305\uFF09
 
-\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8D39\u66FC\u5F0F\u8BB2\u89E3\u5458\u3002\u6839\u636E\u9644\u540E\u7684\u4E0A\u4E0B\u6587\u5305\uFF0C\u4E3A\u300C\u76EE\u6807\u8282\u70B9\u300D\u5199\u4E00\u8282\u300C\u4EE5\u6559\u4EE3\u5B66\u300D\u7684\u8BFE\u7A0B\u7B14\u8BB0\uFF1A\u5047\u8BBE\u5B66\u4E60\u8005\u8981\u628A\u8FD9\u8282\u8BFE\u8BB2\u7ED9\u4E00\u4E2A\u806A\u660E\u7684\u5341\u4E8C\u5C81\u5B69\u5B50\u542C\uFF0C\u7528\u6700\u6734\u7D20\u7684\u7C7B\u6BD4\u548C\u65E5\u5E38\u8BED\u8A00\u628A\u6982\u5FF5\u8BB2\u900F\uFF0C\u518D\u9010\u6B65\u5F15\u5165\u6B63\u5F0F\u8BB0\u53F7\u3002
+\u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u8D39\u66FC\u5F0F\u8BB2\u89E3\u5458\u3002\u6839\u636E\u9644\u540E\u7684\u6750\u6599\uFF0C\u53EA\u5199\u300C\u672C\u8282\u4EFB\u52A1\u300D\u6307\u5B9A\u7684\u8FD9\u4E00\u8282\u6B63\u6587\uFF1A\u5047\u8BBE\u5B66\u4E60\u8005\u8981\u628A\u8FD9\u8282\u8BFE\u8BB2\u7ED9\u4E00\u4E2A\u806A\u660E\u7684\u5341\u4E8C\u5C81\u5B69\u5B50\u542C\uFF0C\u7528\u6700\u6734\u7D20\u7684\u7C7B\u6BD4\u548C\u65E5\u5E38\u8BED\u8A00\u628A\u6982\u5FF5\u8BB2\u900F\uFF0C\u518D\u9010\u6B65\u5F15\u5165\u6B63\u5F0F\u8BB0\u53F7\u3002
 
 ## \u786C\u7EA6\u675F\uFF08\u8FDD\u53CD\u5373\u8FD4\u5DE5\uFF09
 
-1. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
-2. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u53EA\u5728\u300C\u627F\u4E0A\u542F\u4E0B\u300D\u91CC\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
-3. \u7BC7\u5E45 \u2264 2500 \u5B57\uFF1B\u5C0F\u8282\u6807\u9898 = \u7C7B\u578B\u524D\u7F00 + \u5B9E\u9645\u5185\u5BB9\uFF08\u5982 \`## \u6982\u5FF5\uFF1A\u6574\u6570\u4E0E\u81EA\u7136\u6570\u7684\u5206\u754C\`\uFF09\uFF0C\u6309\u8BB2\u89E3\u903B\u8F91\u81EA\u7136\u6392\u5E8F\uFF0C\u4E0D\u5957\u56FA\u5B9A\u680F\u76EE\u540D\uFF1B\u7ED3\u5C3E\u4FDD\u7559 \`## \u627F\u4E0A\u542F\u4E0B\`\u3001\`## \u5185\u5BB9\u53CD\u9988\`\uFF08\u8FD9\u4E24\u8282\u65E0\u524D\u7F00\uFF09\u3002
-4. \u6BCF\u4E2A\u6838\u5FC3\u6982\u5FF5\u5FC5\u987B\u6709\uFF1A\u4E00\u4E2A\u751F\u6D3B\u7C7B\u6BD4\uFF08\u5E76\u660E\u786E\u8BF4\u7C7B\u6BD4\u5728\u54EA\u91CC\u5931\u6548\uFF09\u2192 \u6734\u7D20\u8BED\u8A00\u89E3\u91CA \u2192 \u6B63\u5F0F\u5B9A\u4E49/\u8BB0\u53F7\uFF1B\u6BCF\u8282\u6536\u4E00\u4E2A\u300C\u8BB2\u7ED9\u522B\u4EBA\u542C\u300D\u7684\u81EA\u6D4B\u95EE\u9898\u3002
-5. \u9664\u300C\u627F\u4E0A\u542F\u4E0B/\u5185\u5BB9\u53CD\u9988\u300D\u5916\uFF0C\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\u2014\u2014\u516C\u5F0F\u3001mermaid \u56FE\u6216\u56FE\u7247\u3002
-6. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\uFF0C\u793A\u610F\u56FE\u53EF\u7528 \`\`\`mermaid \u4EE3\u7801\u5757\u3002
+1. \u53EA\u8F93\u51FA\u4E00\u8282\uFF1A\u4EE5 \`## \u7C7B\u578B\uFF1A\u6807\u9898\` \u5F00\u5934\uFF08\u6807\u9898\u4E0E\u7C7B\u578B\u7CBE\u786E\u7167\u6284\u672C\u8282\u4EFB\u52A1\uFF09\uFF0C\u540E\u63A5\u672C\u8282\u6B63\u6587\uFF1B\u4E0D\u5199\u5176\u4ED6\u8282\u3001\u4E0D\u5199 frontmatter\u3002
+2. \u53EA\u7528\u524D\u7F6E\u5DF2\u6559\u6982\u5FF5\u4E0E\u5E38\u8BC6\uFF1B\u300C\u7981\u6B62\u4F7F\u7528\u7684\u6982\u5FF5\u300D\u4E00\u8282\u5217\u51FA\u7684\u540D\u79F0\u4E0D\u5F97\u51FA\u73B0\uFF0C\u4E5F\u4E0D\u5F97\u5F15\u7528\u5176\u7ED3\u8BBA\u3002
+3. \u4E0D\u8D85\u51FA\u300C\u9886\u57DF\u8FB9\u754C\u300D\u58F0\u660E\u7684\u533A\u5757\u8303\u56F4\uFF1B\u540E\u7EE7\u5185\u5BB9\u81F3\u591A\u5728\u81EA\u7136\u6536\u5C3E\u5904\u4E00\u53E5\u8BDD\u5E26\u8FC7\u3002
+4. \u53EF\u89C6\u5316\u4E3A\u4E3B\u3001\u6587\u5B57\u4E3A\u8F85\uFF1A\u8BB2\u89E3\u672C\u4F53\u7528\u516C\u5F0F/mermaid \u56FE/svg \u793A\u610F\u56FE/plot \u51FD\u6570\u56FE/chart \u56FE\u8868/\u4EA4\u4E92\u4EF6\u627F\u8F7D\uFF0C\u6587\u5B57\u53EA\u505A\u5F15\u5BFC\u4E0E\u8854\u63A5\uFF08\u2264150 \u5B57\uFF09\uFF0C\u4E0D\u5199\u5927\u6BB5\u89E3\u8BF4\uFF1B\u6BCF\u8282\u81F3\u5C11\u4E00\u4E2A\u53EF\u89C6\u5316\uFF08\u4EA4\u4E92\u8282\u4E3A\u4EA4\u4E92\u4EF6\u672C\u8EAB\uFF09\uFF1B\u8282\u5185\u4E0D\u5199 ### \u5B50\u6807\u9898\uFF1B\u4E0D\u5728\u6B63\u6587\u81EA\u8BBE\u7EC3\u4E60/\u8D81\u70ED\u7EC3\u4E60\u73AF\u8282\u2014\u2014\u7EC3\u4E60\u7531\u9898\u5E93\u4E0E\u7EC3\u4E60\u8282\u627F\u8F7D\u3002
+5. \u98CE\u683C\u7EA6\u675F\uFF1A\u6BCF\u4E2A\u6838\u5FC3\u6982\u5FF5\u6309\u300C\u751F\u6D3B\u7C7B\u6BD4\uFF08\u5E76\u660E\u786E\u8BF4\u7C7B\u6BD4\u5728\u54EA\u91CC\u5931\u6548\uFF09\u2192 \u6734\u7D20\u8BED\u8A00\u89E3\u91CA \u2192 \u6B63\u5F0F\u5B9A\u4E49/\u8BB0\u53F7\u300D\u63A8\u8FDB\uFF1B\u8282\u672B\u6536\u4E00\u4E2A\u300C\u8BB2\u7ED9\u522B\u4EBA\u542C\u300D\u7684\u81EA\u6D4B\u95EE\u9898\u3002
+6. \u4E0E\u300C\u524D\u4E00\u8282\u5DF2\u751F\u6210\u6B63\u6587\u300D\u81EA\u7136\u8854\u63A5\uFF1A\u4E0D\u91CD\u590D\u5B83\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u5F00\u5934\u4E0D\u590D\u8FF0\u524D\u8282\u7ED3\u8BBA\u3002
+7. \u6392\u7248\u7EA6\u5B9A\uFF1A\u5E76\u5217\u7684\u8BEF\u533A/\u6CE8\u610F/\u8981\u70B9\u5757\u7528 blockquote\uFF08> \u9996\u884C\u52A0\u7C97\u6807\u7B7E\uFF09\uFF1B\u5173\u952E\u7ED3\u8BBA\u7528\u72EC\u7ACB\u516C\u5F0F\uFF08$$\u2026$$\uFF09\uFF1Bmermaid \u8282\u70B9/\u8FB9\u6587\u672C\u542B | { } " # \u7B49\u7279\u6B8A\u5B57\u7B26\u65F6\u5FC5\u987B\u6574\u4F53\u53CC\u5F15\u53F7\u5305\u88F9\uFF08\u5982 \`A["\u6587\u672C"]\`\uFF09\uFF0C\u5426\u5219\u6E32\u67D3\u964D\u7EA7\u4E3A\u6E90\u7801\u3002
+8. \u522B\u540D\u6309\u300C\u89C4\u8303\u7EA6\u675F\u300D\u7EDF\u4E00\uFF1B\u56FE\u7247\u7528 \`![[<\u8BFE\u7A0B\u6839>/\u8BFE\u7A0B\u56FE/xx.png]]\`\u3002
 
 {{renderers}}
 
 ## \u8F93\u51FA
 
-\u53EA\u8F93\u51FA\u8BFE\u7A0B\u7B14\u8BB0\u6B63\u6587\uFF08\u4E0D\u542B frontmatter\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
+\u53EA\u8F93\u51FA\u672C\u8282\u6B63\u6587\uFF08## \u6807\u9898 + \u5185\u5BB9\uFF09\uFF0C\u4E0D\u8981\u9644\u52A0\u89E3\u91CA\u3002
 `,
-    \u9898\u76EE\u751F\u6210: `# \u9898\u76EE\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u8282\u70B9\u6B63\u6587\u7531\u7CFB\u7EDF\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
+    \u9898\u76EE\u751F\u6210: `<!-- learnhub:prompt/v4 -->
+# \u9898\u76EE\u751F\u6210\u63D0\u793A\u8BCD\uFF08\u7528\u6237\u53EF\u7F16\u8F91\uFF1B\u8282\u70B9\u6B63\u6587\u7531\u7CFB\u7EDF\u9644\u5728\u672C\u6A21\u677F\u4E4B\u540E\uFF09
 
 \u4F60\u662F learnhub \u5B66\u4E60\u7CFB\u7EDF\u7684\u51FA\u9898\u8001\u5E08\u3002\u6839\u636E\u9644\u540E\u7684\u8282\u70B9\u6B63\u6587\u51FA\u4E00\u7EC4\u7EC3\u4E60\u9898\uFF0C\u8986\u76D6\u6B63\u6587\u7684\u6838\u5FC3\u6982\u5FF5\u3001\u6613\u9519\u70B9\u4E0E\u5178\u578B\u5E94\u7528\u3002
 
@@ -10801,10 +11082,10 @@ var Content = class _Content {
    - \u53CD\u601D\uFF08reflection\uFF09\uFF1A\u5F00\u653E\u5F0F\u5C0F\u53CD\u601D\uFF0Canswer \u5199\u8BC4\u5206\u8981\u70B9\u3002
    - \u5F00\u653E\u9898\uFF08open_question\uFF09\uFF1A**\u8003\u6574\u4E2A\u8BFE\u65F6\u5185\u5BB9\u7684\u7EFC\u5408\u5E94\u7528**\uFF08\u8DE8\u8282\u7EFC\u5408\uFF0C\u4E0D\u662F\u5355\u8282\u7EC6\u8282\uFF09\uFF0Csection \u56FA\u5B9A\u5199\u300C\u901A\u7528\u300D\uFF1Banswer \u5199\u53C2\u8003\u8981\u70B9\uFF08\u53EF\u7701\u7565\uFF09\u3002\u6BCF\u8F6E\u6700\u591A 1 \u9053\u3002
 2. \u96BE\u5EA6\u9012\u8FDB\uFF1A\u5F00\u5934 1-2 \u9053\u6982\u5FF5\u8FA8\u6790\uFF08difficulty: 1\uFF09\uFF0C\u4E2D\u95F4\u5E94\u7528\u4E0E\u8BA1\u7B97\uFF08difficulty: 2\uFF09\uFF0C\u6536\u5C3E\u7EFC\u5408\u6216\u6613\u9519\u9677\u9631\uFF08difficulty: 3\uFF09+ \u81F3\u591A 1 \u9053\u5F00\u653E\u9898\u3002
-3. \u6BCF\u9898\u5FC5\u987B\u7ED9\u5168\uFF1A\u9898\u5E72\u3001\u7B54\u6848\u3001\u89E3\u6790\uFF08\u8BF4\u660E\u4E3A\u4EC0\u4E48\u5BF9\u3001\u9519\u8BEF\u9009\u9879\u9519\u5728\u54EA\uFF09\u3002
+3. \u6BCF\u9898\u5FC5\u987B\u7ED9\u5168\uFF1A\u9898\u5E72\u3001\u7B54\u6848\u3001\u89E3\u6790\uFF08\u8BF4\u660E\u4E3A\u4EC0\u4E48\u5BF9\u3001\u9519\u8BEF\u9009\u9879\u9519\u5728\u54EA\uFF09\uFF1B\u51E0\u4F55/\u51FD\u6570/\u6570\u636E\u7C7B\u9898\u7684\u89E3\u6790\u53EF\u7528\u4E00\u4E2A \`\`\`svg \u6216 \`\`\`plot \u4EE3\u7801\u5757\u914D\u56FE\u3002
 4. \u53EA\u8003\u6B63\u6587\u91CC\u8BB2\u8FC7\u7684\u5185\u5BB9\uFF0C\u4E0D\u5F97\u5F15\u5165\u6B63\u6587\u6CA1\u6709\u7684\u6982\u5FF5\u3001\u8BB0\u53F7\u6216\u7ED3\u8BBA\u3002
 5. \u9009\u62E9\u9898 options \u4E0D\u5E26 A./B. \u7F16\u53F7\u524D\u7F00\uFF08\u7CFB\u7EDF\u81EA\u52A8\u7F16\u53F7\uFF09\uFF1B\u586B\u7A7A\u9898 answer \u7528\u6570\u7EC4\u5217\u51FA\u6240\u6709\u53EF\u63A5\u53D7\u5199\u6CD5\uFF1Bnode \u5B57\u6BB5\u539F\u6837\u7167\u6284\u7CFB\u7EDF\u7ED9\u51FA\u7684\u8282\u70B9\u540D\u3002
-6. \u6BCF\u9898\u6807\u6CE8 \`section\`\uFF1A\u8BE5\u9898\u8003\u5BDF\u5185\u5BB9\u6240\u5728\u8282\u7684\u6807\u9898\u539F\u6587\uFF08\u7167\u6284\u6B63\u6587\u8282\u6807\u9898\uFF0C\u5982\u300C\u6982\u5FF5\uFF1A\u5B9A\u4E49\u4E0E\u6027\u8D28\u300D\uFF09\uFF1B\u8DE8\u8282\u7EFC\u5408\u9898\u5199\u300C\u901A\u7528\u300D\u3002
+6. \u6BCF\u9898\u6807\u6CE8 \`section\`\uFF1A\u7CFB\u7EDF\u63D0\u4F9B\u8282\u6807\u6CE8\u6E05\u5355\u65F6\uFF0Csection \u5FC5\u987B**\u7CBE\u786E\u7167\u6284\u6E05\u5355\u4E2D\u7684\u8282 id**\uFF08\u5982 \`s2\`\uFF09\uFF1B\u672A\u63D0\u4F9B\u6E05\u5355\u65F6\u7167\u6284\u6B63\u6587\u8282\u6807\u9898\u539F\u6587\uFF08\u5982\u300C\u6982\u5FF5\uFF1A\u5B9A\u4E49\u4E0E\u6027\u8D28\u300D\uFF09\uFF1B\u8DE8\u8282\u7EFC\u5408\u9898\u4E00\u5F8B\u5199\u300C\u901A\u7528\u300D\u3002
 
 ## \u8F93\u51FA
 
@@ -10823,7 +11104,8 @@ questions:
     uses: [\u7528\u5230\u7684\u524D\u7F6E\u6982\u5FF5]
 `
   };
-  /** 读提示词模板；内置类型不存在时写入内置默认，非内置类型要求用户已自建同名文件。
+  /** 读提示词模板；内置模板带版本标记，vault 快照缺标记或版本更低时覆盖升级（旧文件存 .bak 供 diff 恢复），
+   * 非内置类型要求用户已自建同名文件。
    * {{renderers}} 占位符注入渲染能力清单；旧模板缺占位符时在末尾追加注入段（运行时兜底，不改用户文件）。 */
   async loadPrompt(kind) {
     const builtin = _Content.PROMPT_KINDS[kind];
@@ -10832,11 +11114,22 @@ questions:
     if (!builtin && !existsSync2(p)) {
       throw new Error(`[prompt] \u672A\u77E5\u63D0\u793A\u8BCD\u7C7B\u578B: ${kind}\uFF08\u5185\u7F6E\uFF1A${Object.keys(_Content.PROMPT_KINDS).join("\u3001")}\uFF1B\u6216\u5728 state/\u63D0\u793A\u8BCD/ \u81EA\u5EFA ${kind}.md\uFF09`);
     }
-    if (!existsSync2(p)) await writeFile5(p, builtin, "utf8");
+    if (builtin) {
+      const vaultVer = existsSync2(p) ? _Content.promptVersionOf(await readFile6(p, "utf8")) : 0;
+      if (vaultVer < _Content.promptVersionOf(builtin)) {
+        if (existsSync2(p)) await writeFile5(`${p}.bak`, await readFile6(p, "utf8"), "utf8");
+        await writeFile5(p, builtin, "utf8");
+      }
+    }
     const text = await readFile6(p, "utf8");
     const caps = rendererCapabilityBlock();
     if (text.includes("{{renderers}}")) return text.replaceAll("{{renderers}}", caps);
     return text.trimEnd() + "\n\n" + caps;
+  }
+  /** 内置模板首行版本标记 → 数字；无标记（历史快照）= 0，下次 loadPrompt 即升级。 */
+  static promptVersionOf(text) {
+    const m = /^<!-- learnhub:prompt\/v(\d+) -->/.exec(text);
+    return m ? Number(m[1]) : 0;
   }
   /** 可用提示词类型 = 内置 + state/提示词/ 下的自建变体（去 .md）。 */
   async promptKinds() {
@@ -10889,6 +11182,44 @@ questions:
     }
     return [...hits].sort();
   }
+  /** 节形状门禁：节内 ### 子标题破坏原子性（finding）；节 prose 过长
+   * （warn >600 / finding >2000；长度剥离代码块/行内代码/公式/机器注释后计数——
+   * 公式与图表不占文字预算，可视化为辅的文字纪律才有硬约束）。 */
+  static checkSectionShape(body) {
+    const findings = [];
+    const warns = [];
+    for (const part of body.split(/^## /m).slice(1)) {
+      const nl = part.indexOf("\n");
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      if (!title || title.startsWith("<!--")) continue;
+      const md = nl >= 0 ? part.slice(nl + 1) : "";
+      if (/^### /m.test(md)) {
+        findings.push(`\u8282\u300C${title}\u300D\u5185\u51FA\u73B0 ### \u5B50\u6807\u9898\uFF08\u7834\u574F\u8282\u7684\u539F\u5B50\u6027\uFF1A\u4E00\u8282\u53EA\u8BB2\u4E00\u4E2A\u77E5\u8BC6\u70B9\uFF0C\u9700\u8981\u5206\u5C42\u5C31\u62C6\u6210\u591A\u4E2A\u8282\uFF09`);
+      }
+      const prose = md.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "").replace(/\$\$[\s\S]*?\$\$/g, "").replace(/\$[^$\n]+\$/g, "").replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, "");
+      if (prose.length > 2e3) {
+        findings.push(`\u8282\u300C${title}\u300D\u6B63\u6587\u8FC7\u957F\uFF08\u7EA6 ${prose.length} \u5B57\uFF09\uFF1A\u4E00\u8282 = \u5B66\u4E60\u9875 1\u20132 \u5C4F\uFF0C\u628A\u5185\u5BB9\u62C6\u6210\u591A\u4E2A\u8282`);
+      } else if (prose.length > 600) {
+        warns.push(`\u8282\u300C${title}\u300D\u6B63\u6587\u504F\u957F\uFF08\u7EA6 ${prose.length} \u5B57\uFF09\uFF1A\u53EF\u89C6\u5316\u4E3A\u4E3B\u3001\u6587\u5B57\u4E3A\u8F85\uFF0C\u8D85\u8FC7 600 \u5B57\u5EFA\u8BAE\u538B\u7F29\u6216\u62C6\u8282`);
+      }
+    }
+    return { findings, warns };
+  }
+  /** mermaid 引号启发：节点/边文本含 | 等会破坏语法解析的字符且未整体双引号包裹 → warn
+   * （渲染降级为源码块的高频根因，如 `B[模 |v| = …]`）。 */
+  static checkMermaidQuotes(body) {
+    const warns = [];
+    for (const mm of body.matchAll(/```mermaid\n([\s\S]*?)```/g)) {
+      for (const line of mm[1].split("\n")) {
+        const t = line.trim();
+        if (/\[[^"\]]*\|[^"\]]*\]/.test(t)) {
+          warns.push(`mermaid \u8282\u70B9\u6587\u672C\u542B\u300C|\u300D\u672A\u7528\u53CC\u5F15\u53F7\u5305\u88F9\uFF0C\u6E32\u67D3\u4F1A\u964D\u7EA7\u4E3A\u6E90\u7801\uFF1A${t.slice(0, 60)}`);
+          break;
+        }
+      }
+    }
+    return warns;
+  }
   /** 别名一致性：正文出现不采用名 → findings。 */
   async checkAliases(root, body) {
     const table = await this.aliasTable(root);
@@ -10904,6 +11235,35 @@ questions:
     }
     return [...hits].sort();
   }
+  /** 富内容块语法门：plot/chart 必须是合法 JSON 对象、svg 必须以 <svg 开头
+   * （这些块渲染器会降级为源码显示，生成侧越早拦截返工成本越低）。 */
+  static checkVisualBlocks(body) {
+    const findings = [];
+    let i = 0;
+    for (const m of body.matchAll(/^```plot\n([\s\S]*?)```$/gm)) {
+      i++;
+      if (!_Content.isPlainJsonObject(m[1])) findings.push("```plot \u7B2C " + i + " \u5757\u4E0D\u662F\u5408\u6CD5 JSON \u5BF9\u8C61\uFF08\u9762\u677F\u4F1A\u964D\u7EA7\u4E3A\u6E90\u7801\u663E\u793A\uFF09");
+    }
+    i = 0;
+    for (const m of body.matchAll(/^```chart\n([\s\S]*?)```$/gm)) {
+      i++;
+      if (!_Content.isPlainJsonObject(m[1])) findings.push("```chart \u7B2C " + i + " \u5757\u4E0D\u662F\u5408\u6CD5 JSON \u5BF9\u8C61\uFF08\u9762\u677F\u4F1A\u964D\u7EA7\u4E3A\u6E90\u7801\u663E\u793A\uFF09");
+    }
+    i = 0;
+    for (const m of body.matchAll(/^```svg\n([\s\S]*?)```$/gm)) {
+      i++;
+      if (!/^\s*<svg[\s>]/i.test(m[1])) findings.push("```svg \u7B2C " + i + " \u5757\u5FC5\u987B\u4EE5 <svg \u5F00\u5934\uFF08\u5B8C\u6574 SVG \u7247\u6BB5\uFF09");
+    }
+    return findings;
+  }
+  static isPlainJsonObject(text) {
+    try {
+      const v = JSON.parse(text);
+      return typeof v === "object" && v !== null && !Array.isArray(v);
+    } catch {
+      return false;
+    }
+  }
   /** 跑全部可自动化的质检门 → (passed, findings, warns)。 */
   async gateReport(graph, root, node, body) {
     const findings = [];
@@ -10915,6 +11275,12 @@ questions:
     if (!usesMarked) warns.push("\u7EC3\u4E60\u5143\u6570\u636E\u7F3A\u5C11 uses \u6807\u6CE8\uFF08\u4E00\u671F\u5C3D\u529B\u6807\u6CE8\uFF0C\u5EFA\u8BAE\u8865\u4E0A\uFF09");
     const badLangs = _Content.checkRendererLangs(body);
     if (badLangs.length) warns.push(`\u672A\u6CE8\u518C\u7684\u4EE3\u7801\u5757\u8BED\u8A00\uFF08\u9762\u677F\u65E0\u6CD5\u6E32\u67D3\uFF0C\u8BF7\u6539\u7528\u652F\u6301\u7684\u683C\u5F0F\uFF09: ${badLangs.join("\u3001")}`);
+    findings.push(..._Content.checkVisualBlocks(body));
+    const checkedBody = this.stripRoadmapSections(body);
+    const shape = _Content.checkSectionShape(checkedBody);
+    findings.push(...shape.findings);
+    warns.push(...shape.warns);
+    warns.push(..._Content.checkMermaidQuotes(checkedBody));
     const missingInteractive = [];
     for (const m of body.matchAll(/```interactive\n([^\n]+)\n```/g)) {
       const rel = m[1].trim();
@@ -10947,6 +11313,156 @@ ${courseRoot}/${rel}
       }
     );
     return { body: out, files, invalid };
+  }
+  // ---- 节清单（逐节生成管线） ----
+  /** 大纲 YAML → 节清单（id 唯一、type ∈ 节类型菜单、title 非空；全 pending）。 */
+  static parseOutline(yamlText) {
+    const doc = YAML.parseModel(yamlText);
+    if (typeof doc !== "object" || doc === null || !Array.isArray(doc.sections) || !doc.sections.length) {
+      throw new Error("[outline] \u6A21\u578B\u6CA1\u6709\u4EA7\u51FA\u53EF\u7528\u5927\u7EB2\uFF08sections \u4E3A\u7A7A\uFF09\u3002");
+    }
+    const out = [];
+    const ids = /* @__PURE__ */ new Set();
+    doc.sections.forEach((raw, i) => {
+      const e = raw ?? {};
+      const id = typeof e.id === "string" && e.id.trim() ? e.id.trim() : `s${i + 1}`;
+      const title = String(e.title ?? "").trim();
+      const type = String(e.type ?? "").trim() || parseSectionTitle(title).type.prefix;
+      if (!title) throw new Error(`[outline] sections.${i + 1}.title \u4E0D\u80FD\u4E3A\u7A7A`);
+      if (ids.has(id)) throw new Error(`[outline] sections.${i + 1}.id\u300C${id}\u300D\u91CD\u590D`);
+      if (!SECTION_TYPES.some((t) => t.prefix === type)) {
+        throw new Error(`[outline] sections.${i + 1}.type\u300C${type}\u300D\u4E0D\u5728\u8282\u7C7B\u578B\u83DC\u5355\uFF08${SECTION_TYPES.map((t) => t.prefix).join("/")}\uFF09`);
+      }
+      ids.add(id);
+      const points = typeof e.points === "string" ? e.points.trim() : "";
+      out.push({ id, title, type, status: "pending", version: 0, ...points ? { points } : {} });
+    });
+    return out;
+  }
+  /** 大纲落盘：manifest 写入 frontmatter content.sections（全 pending），正文不动。
+   * fm 现读（逐节连续落盘时调用方的 stateMap 已过期）。 */
+  async outlineApply(root, graph, node, yamlText, journal) {
+    const manifest = _Content.parseOutline(yamlText);
+    const [, regionName] = graph.blockOf[node];
+    const path = this.paths.courseNotePath(root, regionName, node);
+    const { fm, body } = await loadNote(path);
+    if (!fm || typeof fm.node !== "string") throw new Error(`[outline] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728\uFF08\u5148\u4E3A\u8282\u70B9\u751F\u6210\u5185\u5BB9\u9AA8\u67B6\uFF09: ${node}`);
+    await saveNote(path, { ...fm, content: { ...fm.content ?? {}, sections: manifest } }, body);
+    await journal({ course: "", node, rating: null, kind: "content_outline", elapsed_days: 0, detail: `\u8282\u6E05\u5355 ${manifest.length} \u8282\u843D\u76D8\uFF08\u5168 pending\uFF09` });
+    return manifest;
+  }
+  /** 单节落盘：交互件标记块先拆出落盘 → 节级质检门 → 正文按清单手术重组 →
+   * 该节 status=ready/version+1、content.version+1（draft）；hints = enc 候选反哺图的补边提醒。 */
+  async sectionApply(root, graph, node, sectionId, md, journal) {
+    const [, regionName] = graph.blockOf[node];
+    const path = this.paths.courseNotePath(root, regionName, node);
+    const { fm, body } = await loadNote(path);
+    if (!fm || typeof fm.node !== "string") throw new Error(`[section] \u8BFE\u7A0B\u6587\u4EF6\u4E0D\u5B58\u5728: ${node}`);
+    const sections = fm.content?.sections ?? [];
+    const entry = sections.find((m) => m.id === sectionId);
+    if (!entry) throw new Error(`[section] \u8282\u70B9\u300C${node}\u300D\u7684\u8282\u6E05\u5355\u91CC\u6CA1\u6709\u300C${sectionId}\u300D\u2014\u2014\u5148\u8FD0\u884C\u5927\u7EB2\u3002`);
+    const split = _Content.extractInteractive(md, root);
+    if (split.invalid.length) {
+      throw new Error(`[section] learnhub-interactive \u6807\u8BB0\u5757\u8DEF\u5F84\u975E\u6CD5\uFF08\u53EA\u5141\u8BB8\u8BFE\u7A0B\u6839\u5185\u76F8\u5BF9 .html \u8DEF\u5F84\uFF0C\u65E0 ..\uFF09: ${split.invalid.join("\u3001")}`);
+    }
+    for (const f of split.files) {
+      const target = `${this.paths.courseRoot(root)}/${f.rel}`;
+      await mkdir5(target.replace(/[/\\][^/\\]+$/, ""), { recursive: true });
+      await writeFile5(target, f.html, "utf8");
+    }
+    const gate = await this.gateReport(graph, root, node, `## ${entry.title}
+
+${split.body}`);
+    const html = _Content.checkInteractiveHtml(split.files);
+    if (gate.findings.length || html.findings.length) {
+      throw new Error(`[section] \u300C${entry.title}\u300D\u8D28\u68C0\u95E8\u672A\u8FC7\uFF1A
+${[...gate.findings, ...html.findings].map((e) => `  \u2717 ${e}`).join("\n")}
+${[...gate.warns, ...html.warns].map((w) => `  \u26A0 ${w}`).join("\n")}`);
+    }
+    const nextSections = sections.map((m) => m.id === sectionId ? { ...m, status: "ready", version: m.version + 1 } : m);
+    const newBody = _Content.assembleBody(body, sections, /* @__PURE__ */ new Map([[entry.title, split.body.trim()]]));
+    const version2 = (fm.content?.version ?? 0) + 1;
+    await saveNote(path, {
+      ...fm,
+      content: {
+        ...fm.content ?? {},
+        version: version2,
+        generated_at: todayStr(),
+        status: "draft",
+        sections: nextSections
+      }
+    }, newBody);
+    await journal({ course: "", node, rating: null, kind: "content_section", elapsed_days: 0, detail: `\u8282\u300C${entry.title}\u300Dv${entry.version + 1} \u843D\u76D8` });
+    return { version: version2, title: entry.title, hints: _Content.encBackfeedHints(graph, node, split.body) };
+  }
+  /** 整篇正文按节清单重组：intro（首个 ## 之前）与保护区（练习/答案/内容反馈/机器块）原样保留；
+   * 清单节用 provided md，否则沿用既有同名节，两者皆无（pending）则不进正文；
+   * 既有内容节不在清单内即丢弃（重生成语义）。 */
+  static assembleBody(existing, manifest, provided) {
+    const encBlock = existing.match(/<!--\s*enc_candidates:[^>]*-->/)?.[0] ?? "";
+    const withoutEnc = encBlock ? existing.replace(encBlock, "") : existing;
+    const parts = withoutEnc.split(/^## /m);
+    const intro = (parts[0] ?? "").trim();
+    const existingSections = /* @__PURE__ */ new Map();
+    const tail = [];
+    for (const part of parts.slice(1)) {
+      const nl = part.indexOf("\n");
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      const md = nl >= 0 ? part.slice(nl + 1) : "";
+      const isProtected = title.startsWith("<!--") || ["\u7EC3\u4E60", "\u7B54\u6848", "\u5185\u5BB9\u53CD\u9988"].includes(title);
+      if (isProtected) tail.push(`## ${part.trimEnd()}`);
+      else existingSections.set(title, md.trim());
+    }
+    const out = [];
+    if (intro) out.push(intro);
+    for (const m of manifest) {
+      const md = provided.get(m.title) ?? existingSections.get(m.title);
+      if (!md) continue;
+      out.push(`## ${m.title}
+
+${md}`);
+    }
+    out.push(...tail);
+    if (encBlock) out.push(encBlock);
+    return out.join("\n\n") + "\n";
+  }
+  /** 从整篇正文重导出节清单（整节点重生成/风格变体后 manifest 与正文重对齐，全部 ready）。 */
+  static manifestFromBody(body, version2) {
+    const out = [];
+    for (const part of body.split(/^## /m).slice(1)) {
+      const title = (part.indexOf("\n") >= 0 ? part.slice(0, part.indexOf("\n")) : part).trim();
+      if (!title || title.startsWith("<!--") || ["\u7EC3\u4E60", "\u7B54\u6848", "\u5185\u5BB9\u53CD\u9988"].includes(title)) continue;
+      out.push({ id: `s${out.length + 1}`, title, type: parseSectionTitle(title).type.prefix, status: "ready", version: version2 });
+    }
+    return out;
+  }
+  /** 交互件 HTML 门禁：体积上限、禁外联、完成上报必查；widget-config 契约缺失降级为警告
+   * （存量 v1 交互件不返工，新生成由提示词保证）。 */
+  static checkInteractiveHtml(files) {
+    const findings = [];
+    const warns = [];
+    for (const f of files) {
+      if (f.html.length > 200 * 1024) findings.push(`\u4EA4\u4E92\u4EF6\u5355\u6587\u4EF6\u8D85\u8FC7 200KB: ${f.rel}`);
+      if (/(?:src|href)\s*=\s*["']https?:\/\//i.test(f.html) || /fetch\(|XMLHttpRequest/.test(f.html)) {
+        findings.push(`\u4EA4\u4E92\u4EF6\u542B\u5916\u8054\u8D44\u6E90\u6216\u7F51\u7EDC\u8C03\u7528\uFF08\u6C99\u7BB1\u5185\u4E0D\u53EF\u7528\uFF0C\u9700\u81EA\u5305\u542B\uFF09: ${f.rel}`);
+      }
+      if (!f.html.includes("LEARNHUB_COMPLETE")) findings.push(`\u4EA4\u4E92\u4EF6\u7F3A\u5C11 LEARNHUB_COMPLETE \u5B8C\u6210\u4E0A\u62A5: ${f.rel}`);
+      if (!f.html.includes("LEARNHUB_TEACHER")) warns.push(`\u4EA4\u4E92\u4EF6\u672A\u5B9E\u73B0 LEARNHUB_TEACHER \u76D1\u542C\uFF08AI \u8001\u5E08\u65E0\u6CD5\u9A71\u52A8\u6F14\u793A\uFF09: ${f.rel}`);
+      const m = /<script[^>]*type="application\/json"[^>]*id="widget-config"[^>]*>([\s\S]*?)<\/script>/i.exec(f.html);
+      if (!m) {
+        warns.push(`\u4EA4\u4E92\u4EF6\u7F3A\u5C11 widget-config \u5143\u6570\u636E\uFF08\u5EFA\u8BAE\u8865 {type, description}\uFF09: ${f.rel}`);
+        continue;
+      }
+      try {
+        const cfg = JSON.parse(m[1]);
+        if (typeof cfg.type !== "string" || !INTERACTIVE_TYPES.includes(cfg.type)) {
+          findings.push(`\u4EA4\u4E92\u4EF6 widget-config.type\u300C${String(cfg.type)}\u300D\u4E0D\u5728\u7C7B\u578B\u83DC\u5355\uFF08${INTERACTIVE_TYPES.join("/")}\uFF09: ${f.rel}`);
+        }
+      } catch {
+        findings.push(`\u4EA4\u4E92\u4EF6 widget-config JSON \u4E0D\u53EF\u89E3\u6790: ${f.rel}`);
+      }
+    }
+    return { findings, warns };
   }
   // ---- 练习区 ----
   /** 解析练习元数据行 → [{ex, answer, check, difficulty, uses, options?, tol?}]。 */
@@ -10982,6 +11498,17 @@ ${courseRoot}/${rel}
   static encCandidates(body) {
     const m = body.match(/<!--\s*enc_candidates:\s*\[([^\]]*)\]\s*-->/);
     return m ? m[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+  }
+  /** enc 反哺 hints：enc_candidates 引用的图内节点不在本节点 pre 传递闭包 → 建议补边。
+   * E7（audit）管已写入图的 enc 边；本检查把纠正时机提前到内容落盘时（内容反哺图）。 */
+  static encBackfeedHints(graph, node, body) {
+    const out = [];
+    for (const cand of _Content.encCandidates(body)) {
+      if (graph.nset.has(cand) && !graph.isAncestor(cand, node)) {
+        out.push(`\u300C${cand}\u300D\u88AB enc_candidates \u5F15\u7528\u4F46\u4E0D\u5728\u672C\u8282\u70B9 pre \u95ED\u5305\u2014\u2014\u786E\u8BA4\u4F9D\u8D56\u540E\u7528 learnhub_graph_propose(kind=edit) \u7684 set_pre \u8865\u8FB9`);
+      }
+    }
+    return out;
   }
   /** 题干下方选项行（A. … / A) …）→ ["A. …"]；不足 2 项视为无选项。 */
   extractOptions(text) {
@@ -11067,7 +11594,14 @@ ${courseRoot}/${rel}
     const version2 = fm.content.version + 1;
     const next = {
       ...fm,
-      content: { version: version2, generated_at: todayStr(), status: "draft" }
+      content: {
+        ...fm.content,
+        version: version2,
+        generated_at: todayStr(),
+        status: "draft",
+        // 节清单节点：整篇替换后 manifest 与正文重对齐（全部 ready、版本同步）
+        ...fm.content.sections ? { sections: _Content.manifestFromBody(body, version2) } : {}
+      }
     };
     const [, regionName] = graph.blockOf[node];
     const path = this.paths.courseNotePath(root, regionName, node);
@@ -11147,7 +11681,10 @@ init_store();
 import { readFile as readFile7, writeFile as writeFile6, rename as rename2, mkdir as mkdir6, unlink } from "node:fs/promises";
 import { existsSync as existsSync3 } from "node:fs";
 init_notes();
-var EDIT_OPS = ["add_node", "del_node", "set_pre", "rename", "move", "set_note"];
+var EDIT_OPS = ["add_node", "del_node", "set_pre", "set_enc", "rename", "move", "set_note"];
+function normalizeOpEnc(raw) {
+  return (raw ?? []).map((item) => typeof item === "string" ? { node: item, w: 1 } : { node: item.node, w: item.w ?? 1, ...item.note ? { note: item.note } : {} });
+}
 function nonempty(v, what) {
   if (typeof v !== "string" || !v.trim()) throw new Error(`${what} \u4E0D\u80FD\u4E3A\u7A7A`);
   return v.trim();
@@ -11194,6 +11731,16 @@ function validateGenProposal(doc) {
             errors.push(`${where}.blocks.${bi}: \u5757[${b.name}] \u6CA1\u6709\u8282\u70B9`);
             return;
           }
+          nodes.forEach((rawNode, ni) => {
+            const nd = rawNode ?? {};
+            const nwhere = `${where}.blocks.${bi}.nodes.${String(nd.name ?? ni)}`;
+            if (nd.bloom !== void 0 && !BLOOM_LEVELS.includes(String(nd.bloom))) {
+              errors.push(`${nwhere}.bloom: \u975E\u6CD5\u8BA4\u77E5\u5C42\u7EA7 ${String(nd.bloom)}\uFF08\u5141\u8BB8 ${BLOOM_LEVELS.join("/")}\uFF09`);
+            }
+            if (nd.difficulty !== void 0 && ![1, 2, 3, 4, 5].includes(Number(nd.difficulty))) {
+              errors.push(`${nwhere}.difficulty: \u975E\u6CD5\u96BE\u5EA6 ${String(nd.difficulty)}\uFF08\u5141\u8BB8 1-5\uFF09`);
+            }
+          });
           blocks.push({ name: b.name.trim(), nodes });
         });
       }
@@ -11231,6 +11778,29 @@ function validateEditProposal(doc) {
       if (!(o.node && String(o.node).trim())) errors.push(`${where}: op=${op} \u9700\u8981 node`);
       if (op === "rename" && !(o.new && String(o.new).trim())) errors.push(`${where}: rename \u9700\u8981 new`);
       if ((op === "add_node" || op === "move") && !(o.region && o.block)) errors.push(`${where}: op=${op} \u9700\u8981 region \u4E0E block`);
+      if (o.bloom !== void 0 && o.bloom !== "" && !BLOOM_LEVELS.includes(String(o.bloom))) {
+        errors.push(`${where}.bloom: \u975E\u6CD5\u8BA4\u77E5\u5C42\u7EA7 ${String(o.bloom)}\uFF08\u5141\u8BB8 ${BLOOM_LEVELS.join("/")}\uFF09`);
+      }
+      if (o.difficulty !== void 0 && o.difficulty !== "" && ![1, 2, 3, 4, 5].includes(Number(o.difficulty))) {
+        errors.push(`${where}.difficulty: \u975E\u6CD5\u96BE\u5EA6 ${String(o.difficulty)}\uFF08\u5141\u8BB8 1-5\uFF09`);
+      }
+      if (o.est !== void 0 && o.est !== "" && !(Number.isFinite(Number(o.est)) && Number(o.est) > 0)) {
+        errors.push(`${where}.est: \u975E\u6CD5\u65F6\u957F ${String(o.est)}\uFF08\u5206\u949F\uFF0C\u6B63\u6570\uFF09`);
+      }
+      if (o.type !== void 0 && o.type !== "" && o.type !== "practice") {
+        errors.push(`${where}.type: \u975E\u6CD5\u8282\u70B9\u7C7B\u578B ${String(o.type)}\uFF08\u53EA\u5141\u8BB8 practice\uFF09`);
+      }
+      if (o.enc !== void 0) {
+        if (!Array.isArray(o.enc)) {
+          errors.push(`${where}.enc: \u5FC5\u987B\u662F\u5217\u8868`);
+        } else o.enc.forEach((e, j) => {
+          const item = e;
+          const t = typeof item === "string" ? item : item?.node;
+          if (typeof t !== "string" || !t.trim()) errors.push(`${where}.enc.${j}: \u7F3A node`);
+          const w = typeof item === "object" && item !== null ? item.w : void 0;
+          if (w !== void 0 && (typeof w !== "number" || w < 0 || w > 1)) errors.push(`${where}.enc.${j}: w \u5FC5\u987B\u662F 0\u20131 \u7684\u6570`);
+        });
+      }
       ops.push({
         op,
         node: typeof o.node === "string" ? o.node.trim() : void 0,
@@ -11238,13 +11808,25 @@ function validateEditProposal(doc) {
         region: typeof o.region === "string" ? o.region.trim() : void 0,
         block: typeof o.block === "string" ? o.block.trim() : void 0,
         pre: Array.isArray(o.pre) ? o.pre.map(String) : [],
+        ...Array.isArray(o.enc) ? { enc: o.enc } : {},
         opt: Boolean(o.opt),
-        note: typeof o.note === "string" ? o.note : void 0
+        note: typeof o.note === "string" ? o.note : void 0,
+        ...Number.isFinite(Number(o.est)) && Number(o.est) > 0 ? { est: Math.round(Number(o.est)) } : {},
+        ...o.type === "practice" ? { type: "practice" } : {},
+        ...typeof o.bloom === "string" && BLOOM_LEVELS.includes(o.bloom) ? { bloom: o.bloom } : {},
+        ...[1, 2, 3, 4, 5].includes(Number(o.difficulty)) ? { difficulty: Number(o.difficulty) } : {}
       });
     });
   }
   if (errors.length) return { errors };
   return { spec: { course: d.course.trim(), reason: typeof d.reason === "string" ? d.reason : "", ops } };
+}
+function applyFindings(audit) {
+  const findings = audit.warns.map((w) => `\u26A0 ${w}`);
+  if (audit.ok && audit.health > 0 && audit.health < 80) {
+    findings.push(`\u26A0 \u56FE\u8C31\u5065\u5EB7\u5206 ${audit.health} < 80\uFF1A\u7ED3\u675F\u6761\u4EF6\u672A\u6EE1\u8DB3\uFF0C\u7EE7\u7EED\u5206\u6279\u6784\u5EFA\uFF08learnhub_graph_analyze \u7684 health/suggestions \u7ED9\u51FA\u65B9\u5411\uFF09`);
+  }
+  return findings;
 }
 var GraphProposals = class {
   constructor(paths, store, registry, centerRoot) {
@@ -11284,7 +11866,7 @@ var GraphProposals = class {
   }
   /** graph propose-gen：校验课程图 YAML → pending 提案。 */
   async proposeGen(yamlText) {
-    const v = validateGenProposal(YAML.parse(yamlText));
+    const v = validateGenProposal(YAML.parseModel(yamlText));
     if (v.errors) throw new Error(`[propose-gen] schema \u6821\u9A8C\u5931\u8D25\uFF0C\u63D0\u6848\u672A\u53D7\u7406\u3002
 ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     const spec = v.spec;
@@ -11297,13 +11879,13 @@ ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     if (errors.length) throw new Error(`[propose-gen] \u7ED3\u6784\u68C0\u67E5\u5931\u8D25\uFF0C\u63D0\u6848\u672A\u53D7\u7406\uFF08\u4FEE\u6B63\u540E\u91CD\u63D0\uFF09\u3002
 ${errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     const nodeCount = newRegions.flatMap((r) => r.blocks.flatMap((b) => b.nodes)).length;
-    const { pid } = await this.saveArtifact("gen", spec.course, YAML.parse(yamlText));
+    const { pid } = await this.saveArtifact("gen", spec.course, YAML.parseModel(yamlText));
     await this.store.updateProposal(pid, { summary: `${spec.mode}\uFF1A${spec.regions.length} \u533A / ${nodeCount} \u8282\u70B9` });
     return { id: pid, kind: "gen", course: spec.course, mode: spec.mode, regions: spec.regions.length, nodes: nodeCount };
   }
   /** graph apply-gen：把 pending 生成提案写入 data/*.yaml（audit 门禁在 facade 层跑）。 */
-  async applyGen(pid, auditOk = true) {
-    if (!auditOk) throw new Error("[apply-gen] \u5BA1\u8BA1\u5B58\u5728 ERROR\uFF0C\u62D2\u7EDD\u5199\u5165\u2014\u2014\u5148\u5904\u7406 \u5BA1\u8BA1\u62A5\u544A.md\u3002");
+  async applyGen(pid, audit = { ok: true, warns: [], health: 0 }) {
+    if (!audit.ok) throw new Error("[apply-gen] \u5BA1\u8BA1\u5B58\u5728 ERROR\uFF0C\u62D2\u7EDD\u5199\u5165\u2014\u2014\u5148\u5904\u7406 \u5BA1\u8BA1\u62A5\u544A.md\u3002");
     const prop = await this.store.takePending("gen", pid);
     const v = validateGenProposal(await this.loadArtifact(prop.artifact));
     if (v.errors || !v.spec) throw new Error(`[apply-gen] \u63D0\u6848\u4EA7\u7269 schema \u5931\u6548\u3002
@@ -11341,7 +11923,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
     await this.ensureNotesFor(root, regions);
     await this.store.appendJournal({ course: course.name, node: "*", rating: null, kind: "graph_gen", elapsed_days: 0, session: String(prop.id), detail: `\u65B0\u589E\u533A: ${written.join("\u3001")}` });
     await this.store.updateProposal(prop.id, { status: "applied", decided: (/* @__PURE__ */ new Date()).toISOString(), decision_note: `\u5FEB\u7167 v${version2}` });
-    return { course: course.name, regions: written, snapshot: version2, nodes: new Graph(regions).names.length };
+    return { course: course.name, regions: written, snapshot: version2, nodes: new Graph(regions).names.length, findings: applyFindings(audit) };
   }
   /** mode=new：注册表条目 + data/课程/state 脚手架。 */
   async initCourse(name2) {
@@ -11357,7 +11939,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
   }
   /** graph propose-edit：在内存图上模拟执行 → pending。 */
   async proposeEdit(yamlText) {
-    const v = validateEditProposal(YAML.parse(yamlText));
+    const v = validateEditProposal(YAML.parseModel(yamlText));
     if (v.errors) throw new Error(`[propose-edit] schema \u6821\u9A8C\u5931\u8D25\uFF0C\u63D0\u6848\u672A\u53D7\u7406\u3002
 ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     const spec = v.spec;
@@ -11368,13 +11950,13 @@ ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
     const errors = simulateOps(regions, graph, spec.ops);
     if (errors.length) throw new Error(`[propose-edit] \u6A21\u62DF\u6267\u884C\u5931\u8D25\uFF0C\u63D0\u6848\u672A\u53D7\u7406\uFF08\u4FEE\u6B63\u540E\u91CD\u63D0\uFF09\u3002
 ${errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
-    const { pid } = await this.saveArtifact("edit", spec.course, YAML.parse(yamlText));
+    const { pid } = await this.saveArtifact("edit", spec.course, YAML.parseModel(yamlText));
     await this.store.updateProposal(pid, { summary: `${spec.ops.length} \u6761\u64CD\u4F5C\uFF1A${spec.ops.map((o) => o.op).join("\u3001")}` });
     return { id: pid, kind: "edit", course: spec.course, ops: spec.ops.length };
   }
   /** graph apply-edit：执行变更 + 改名/移动/删除联动课程笔记 + 快照。 */
-  async applyEdit(pid, auditOk = true) {
-    if (!auditOk) throw new Error("[apply-edit] \u5BA1\u8BA1\u5B58\u5728 ERROR\uFF0C\u62D2\u7EDD\u5199\u5165\u2014\u2014\u5148\u5904\u7406 \u5BA1\u8BA1\u62A5\u544A.md\u3002");
+  async applyEdit(pid, audit = { ok: true, warns: [], health: 0 }) {
+    if (!audit.ok) throw new Error("[apply-edit] \u5BA1\u8BA1\u5B58\u5728 ERROR\uFF0C\u62D2\u7EDD\u5199\u5165\u2014\u2014\u5148\u5904\u7406 \u5BA1\u8BA1\u62A5\u544A.md\u3002");
     const prop = await this.store.takePending("edit", pid);
     const v = validateEditProposal(await this.loadArtifact(prop.artifact));
     if (v.errors || !v.spec) throw new Error(`[apply-edit] \u63D0\u6848\u4EA7\u7269 schema \u5931\u6548\u3002
@@ -11418,7 +12000,7 @@ ${(v.errors ?? []).map((e) => `  \u2717 ${e}`).join("\n")}`);
       detail: spec.ops.map((o) => `${o.op}(${o.node})`).join("\uFF1B")
     });
     await this.store.updateProposal(prop.id, { status: "applied", decided: (/* @__PURE__ */ new Date()).toISOString(), decision_note: `\u5FEB\u7167 v${version2}` });
-    return { course: course.name, ops: spec.ops.length, snapshot: version2, renames, deleted: dels };
+    return { course: course.name, ops: spec.ops.length, snapshot: version2, renames, deleted: dels, findings: applyFindings(audit) };
   }
   /** 改名/移动联动课程笔记：搬文件 + 更新 fm.node + 题库随迁；无笔记静默跳过。 */
   async relocateNote(root, graph, node, newName, newRegion) {
@@ -11504,6 +12086,12 @@ function parseProposalNode(raw) {
     if (Number.isFinite(est) && est > 0) node.est = Math.round(est);
   }
   if (raw.type === "practice") node.type = "practice";
+  if (typeof raw.bloom === "string" && BLOOM_LEVELS.includes(raw.bloom)) {
+    node.bloom = raw.bloom;
+  }
+  if ([1, 2, 3, 4, 5].includes(Number(raw.difficulty))) {
+    node.difficulty = Number(raw.difficulty);
+  }
   return node;
 }
 function simulateOps(regions, graph, ops) {
@@ -11529,7 +12117,17 @@ function simulateOps(regions, graph, ops) {
         blk = { name: op.block, nodes: [] };
         r.blocks.push(blk);
       }
-      blk.nodes.push({ name: op.node, pre: [...op.pre ?? []], opt: Boolean(op.opt), note: op.note ?? "", enc: [] });
+      blk.nodes.push({
+        name: op.node,
+        pre: [...op.pre ?? []],
+        opt: Boolean(op.opt),
+        note: op.note ?? "",
+        ...op.enc !== void 0 ? { enc: normalizeOpEnc(op.enc) } : { enc: [] },
+        ...op.est !== void 0 ? { est: op.est } : {},
+        ...op.type ? { type: op.type } : {},
+        ...op.bloom ? { bloom: op.bloom } : {},
+        ...op.difficulty !== void 0 ? { difficulty: op.difficulty } : {}
+      });
       names.add(op.node);
     } else if (op.op === "del_node") {
       if (!names.has(op.node)) {
@@ -11560,6 +12158,14 @@ function simulateOps(regions, graph, ops) {
       for (const r of sim) for (const b of r.blocks) for (const n of b.nodes) {
         if (n.name === op.node) n.pre = [...op.pre ?? []];
       }
+    } else if (op.op === "set_enc") {
+      if (!names.has(op.node)) {
+        errors.push(`set_enc \u8282\u70B9\u4E0D\u5B58\u5728: ${op.node}`);
+        continue;
+      }
+      for (const r of sim) for (const b of r.blocks) for (const n of b.nodes) {
+        if (n.name === op.node) n.enc = normalizeOpEnc(op.enc);
+      }
     }
   }
   const mapped = (p) => renameMap[p] ?? p;
@@ -11578,6 +12184,8 @@ function simulateOps(regions, graph, ops) {
     const merged = new Graph(sim);
     const dangling = new Set(merged.names.flatMap((n) => merged.preOf[n].filter((p) => !merged.nset.has(p)).map((p) => `${n} -> ${p}`)));
     for (const d of [...dangling].sort()) errors.push(`\u53D8\u66F4\u540E\u65AD\u8FB9: ${d}`);
+    const encDangling = new Set(merged.names.flatMap((n) => (merged.encOf[n] ?? []).filter(([p]) => !merged.nset.has(p)).map(([p]) => `${n} ~enc~ ${p}`)));
+    for (const d of [...encDangling].sort()) errors.push(`\u53D8\u66F4\u540E enc \u65AD\u8FB9: ${d}`);
     if (merged.hasCycle) errors.push(`\u53D8\u66F4\u540E\u5F15\u5165\u73AF\uFF1A${merged.cycleNodes.slice(0, 5).join("\u3001")}`);
   }
   return errors;
@@ -11601,7 +12209,17 @@ function applyOpsToRegions(regions, ops) {
         blk = { name: op.block, nodes: [] };
         r.blocks.push(blk);
       }
-      blk.nodes.push({ name: op.node, pre: [...op.pre ?? []], opt: Boolean(op.opt), note: op.note ?? "", enc: [] });
+      blk.nodes.push({
+        name: op.node,
+        pre: [...op.pre ?? []],
+        opt: Boolean(op.opt),
+        note: op.note ?? "",
+        ...op.enc !== void 0 ? { enc: normalizeOpEnc(op.enc) } : { enc: [] },
+        ...op.est !== void 0 ? { est: op.est } : {},
+        ...op.type ? { type: op.type } : {},
+        ...op.bloom ? { bloom: op.bloom } : {},
+        ...op.difficulty !== void 0 ? { difficulty: op.difficulty } : {}
+      });
     } else if (op.op === "del_node") {
       removed.add(op.node);
     } else if (op.op === "rename") {
@@ -11620,6 +12238,9 @@ function applyOpsToRegions(regions, ops) {
     } else if (op.op === "set_pre") {
       const hit = findNode(op.node);
       if (hit) hit.n.pre = [...op.pre ?? []];
+    } else if (op.op === "set_enc") {
+      const hit = findNode(op.node);
+      if (hit) hit.n.enc = normalizeOpEnc(op.enc);
     } else if (op.op === "set_note") {
       const hit = findNode(op.node);
       if (hit) hit.n.note = op.note ?? "";
@@ -11951,7 +12572,7 @@ var QuestionBank = class {
   }
   /** 校验并写入题库 YAML（LLM 产出过门禁后落盘）。 */
   async save(courseRoot, yamlText, expectedNode) {
-    const doc = YAML.parse(yamlText);
+    const doc = YAML.parseModel(yamlText);
     const v = validateBank(doc, expectedNode);
     if (v.errors) throw new Error(`[question-save] schema \u6821\u9A8C\u5931\u8D25\uFF0C\u9898\u5E93\u672A\u5199\u5165\u3002
 ${v.errors.map((e) => `  \u2717 ${e}`).join("\n")}`);
@@ -12280,7 +12901,7 @@ var Sessions = class _Sessions {
       node,
       region: regionName,
       stage: effectiveStage(state, node),
-      mastery: fm.mastery,
+      mastery: masteryOfFm(fm),
       sections,
       prereqs: [...graph.preOf[node]],
       suggest_next: [...unlocks, ...candidates.filter((n) => !unlocks.includes(n))].slice(0, 8)
@@ -12530,6 +13151,114 @@ ${lines.join("\n")}` };
     if (elementsOnly) return { nodes: doc.nodes, edges: doc.edges };
     return doc;
   }
+  // ---- 图探索（agent 逐步查询，不拉全图）----
+  /** 单节点图详情：schema 字段值 + 直接邻域（succ）+ enc 边（含 note）+ 前置传递闭包。 */
+  async graphNode(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[graph-node] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u8BFE\u7A0B\u300C${c.name}\u300D\u7684\u56FE\u5185\u3002`);
+    let gnode;
+    for (const r of graph.regions) for (const b of r.blocks) {
+      const hit = b.nodes.find((n) => n.name === node);
+      if (hit) {
+        gnode = hit;
+        break;
+      }
+    }
+    const seen = /* @__PURE__ */ new Set([node]);
+    const queue = [node];
+    while (queue.length) {
+      const u = queue.shift();
+      for (const p of graph.preOf[u]) if (!seen.has(p)) {
+        seen.add(p);
+        queue.push(p);
+      }
+    }
+    const closure = [...seen].filter((n) => n !== node).sort((a, b) => (graph.depth[b] ?? 0) - (graph.depth[a] ?? 0));
+    const fm = state[node];
+    return {
+      course: c.name,
+      node,
+      region: graph.blockOf[node][1],
+      block: graph.blockOf[node][2],
+      depth: graph.depth[node] ?? 0,
+      opt: graph.opt.has(node),
+      pre: graph.preOf[node],
+      succ: graph.succ[node] ?? [],
+      enc: gnode?.enc ?? [],
+      est: graph.estOf[node],
+      type: graph.typeOf[node],
+      bloom: graph.bloomOf[node],
+      difficulty: graph.difficultyOf[node],
+      note: graph.noteOf[node],
+      stage: effectiveStage(state, node),
+      mastery: masteryOfFm(fm),
+      content: fm?.content ? { version: fm.content.version, status: fm.content.status } : void 0,
+      prereq_closure: closure
+    };
+  }
+  /** 区/块浏览：按区名/块名过滤的节点清单（探索某区域的结构与内容状态）。 */
+  async graphBrowse(courseKey, region, block) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (region && !graph.regions.some((r) => r.name === region)) {
+      throw new Error(`[graph-browse] \u533A\u300C${region}\u300D\u4E0D\u5B58\u5728\uFF08\u53EF\u7528\uFF1A${graph.regions.map((r) => r.name).join("\u3001")}\uFF09`);
+    }
+    const regions = graph.regions.filter((r) => !region || r.name === region).map((r) => ({
+      name: r.name,
+      blocks: r.blocks.filter((b) => !block || b.name === block).map((b) => ({
+        name: b.name,
+        nodes: b.nodes.map((n) => ({
+          node: n.name,
+          depth: graph.depth[n.name] ?? 0,
+          stage: effectiveStage(state, n.name),
+          est: graph.estOf[n.name],
+          difficulty: graph.difficultyOf[n.name],
+          type: graph.typeOf[n.name],
+          content_status: state[n.name]?.content.status ?? "draft"
+        }))
+      }))
+    }));
+    const total = regions.reduce((s, r) => s + r.blocks.reduce((t, b) => t + b.nodes.length, 0), 0);
+    return { course: c.name, total, regions };
+  }
+  /** 前置路径查询：from 是否（以及经哪条链）是 to 的前置。 */
+  async graphPath(courseKey, from, to) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph } = await this.loadView(c);
+    if (!graph.nset.has(from)) throw new Error(`[graph-path] from \u8282\u70B9\u300C${from}\u300D\u4E0D\u5728\u8BFE\u7A0B\u300C${c.name}\u300D\u7684\u56FE\u5185\u3002`);
+    if (!graph.nset.has(to)) throw new Error(`[graph-path] to \u8282\u70B9\u300C${to}\u300D\u4E0D\u5728\u8BFE\u7A0B\u300C${c.name}\u300D\u7684\u56FE\u5185\u3002`);
+    const seen = /* @__PURE__ */ new Set([to]);
+    const parent = {};
+    const queue = [to];
+    while (queue.length) {
+      const u = queue.shift();
+      for (const p of graph.preOf[u]) if (!seen.has(p)) {
+        seen.add(p);
+        parent[p] = u;
+        queue.push(p);
+      }
+    }
+    if (!seen.has(from)) {
+      return { course: c.name, from, to, related: false, message: `\u300C${from}\u300D\u4E0D\u5728\u300C${to}\u300D\u7684\u524D\u7F6E\u95ED\u5305\u5185\u3002` };
+    }
+    const chain = [from];
+    let cur = from;
+    while (cur !== to) {
+      cur = parent[cur];
+      chain.push(cur);
+    }
+    return {
+      course: c.name,
+      from,
+      to,
+      related: true,
+      direct: graph.preOf[to].includes(from),
+      closure_size: seen.size - 1,
+      chain,
+      depth_span: (graph.depth[to] ?? 0) - (graph.depth[from] ?? 0)
+    };
+  }
   // ---- 提案门禁包装（apply 前 audit 拦截） ----
   async graphPropose(kind, yamlText) {
     return kind === "edit" ? this.proposals.proposeEdit(yamlText) : this.proposals.proposeGen(yamlText);
@@ -12537,13 +13266,13 @@ ${lines.join("\n")}` };
   async graphApply(kind, pid) {
     const pending = await this.store.takePending(kind, pid);
     const course = await this.registry.get(pending.course);
-    let auditOk = true;
+    let audit = { ok: true, warns: [], health: 0 };
     if (course) {
       const { graph } = await this.loadView(course);
-      const audit = await runAudit(this.paths, course.root, course.name, graph, graph.regions);
-      auditOk = !audit.failed;
+      const result = await runAudit(this.paths, course.root, course.name, graph, graph.regions);
+      audit = { ok: !result.failed, warns: result.warns.slice(0, 8), health: graphHealthScore(graph).score };
     }
-    return kind === "edit" ? this.proposals.applyEdit(pid, auditOk) : this.proposals.applyGen(pid, auditOk);
+    return kind === "edit" ? this.proposals.applyEdit(pid, audit) : this.proposals.applyGen(pid, audit);
   }
   async graphReject(pid, note = "") {
     return this.proposals.reject(pid, note);
@@ -12599,10 +13328,11 @@ ${lines.join("\n")}` };
       await writeFile8(target, f.html, "utf8");
     }
     const gate = await this.content.gateReport(graph, c.root, node, split.body);
-    if (!gate.passed) {
+    const html = Content.checkInteractiveHtml(split.files);
+    if (!gate.passed || html.findings.length) {
       throw new Error(`[apply] \u8D28\u68C0\u95E8\u672A\u8FC7\uFF1A
-${gate.findings.map((e) => `  \u2717 ${e}`).join("\n")}
-${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
+${[...gate.findings, ...html.findings].map((e) => `  \u2717 ${e}`).join("\n")}
+${[...gate.warns, ...html.warns].map((w) => `  \u26A0 ${w}`).join("\n")}`);
     }
     const normalized = this.content.normalizePractice(split.body);
     const version2 = await this.content.applyGeneration(
@@ -12615,7 +13345,84 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     );
     await this.content.queueDone(c.root, node);
     const interactiveNote = split.files.length ? `\uFF1B\u4EA4\u4E92\u4EF6 ${split.files.length} \u4E2A\u843D\u76D8 \u4EA4\u4E92/` : "";
-    return { version: version2, message: `[apply] ${node} \u6B63\u6587 v${version2} \u843D\u76D8\uFF08status=draft\uFF0C\u5F85\u4EBA\u5BA1\uFF09${interactiveNote}` };
+    const hints = Content.encBackfeedHints(graph, node, split.body);
+    const hintNote = hints.length ? `\uFF1B\u56FE\u4F9D\u8D56\u63D0\u9192 ${hints.length} \u6761` : "";
+    return { version: version2, message: `[apply] ${node} \u6B63\u6587 v${version2} \u843D\u76D8\uFF08status=draft\uFF0C\u5F85\u4EBA\u5BA1\uFF09${interactiveNote}${hintNote}`, hints };
+  }
+  /** 大纲落盘：节清单 YAML → 校验 → frontmatter content.sections（全 pending），正文不动。
+   * 骨架节点先建占位文件（allo on-demand：大纲即时）。 */
+  async contentOutline(courseKey, node, yamlText) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[outline] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    if (!state[node]) await this.ensureNote(c.root, graph, node);
+    return this.content.outlineApply(c.root, graph, node, yamlText, (rec) => this.store.appendJournal({ ...rec, course: c.name }));
+  }
+  /** 整课重置（「重新生成整课」第一步）：全部节点笔记备份进 .trash 后重写为未生成骨架
+   * （content=draft/sections 清空、正文清空）；题库/交互/课程图三个生成产物目录移入同一
+   * trash 备份目录（rename，可恢复）。图谱（data/）、注册表、学习进度（state/）、
+   * 提示词快照、生成队列.md 均不动；重新生成由调用方按拓扑序串行跑生成管线。 */
+  async contentReset(courseKey) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+    const trashBase = `${this.paths.trashDir}/regenerate-${stamp}`;
+    const nodes = [];
+    for (const node of graph.order.length ? graph.order : graph.names) {
+      if (!state[node]) continue;
+      const [, regionName] = graph.blockOf[node];
+      const path = this.paths.courseNotePath(c.root, regionName, node);
+      const backup = `${trashBase}/${c.root}/\u8BFE\u7A0B/${safeFilename(regionName)}/${safeFilename(node)}.md`;
+      await mkdir8(backup.replace(/[/\\][^/\\]+$/, ""), { recursive: true });
+      await writeFile8(backup, await readFile10(path, "utf8"), "utf8");
+      const { fm } = await loadNote(path);
+      await saveNote(path, {
+        ...fm ?? {},
+        content: { version: 0, generated_at: null, status: "draft", sections: [] }
+      }, "> \u5185\u5BB9\u5F85\u751F\u6210\u3002\n");
+      nodes.push(node);
+    }
+    const trashed = [];
+    for (const dir of ["\u9898\u5E93", "\u4EA4\u4E92", "\u8BFE\u7A0B\u56FE"]) {
+      const src = `${this.paths.courseRoot(c.root)}/${dir}`;
+      if (!existsSync6(src)) continue;
+      await mkdir8(trashBase, { recursive: true });
+      await rename3(src, `${trashBase}/${dir}`);
+      trashed.push(dir);
+    }
+    await this.store.appendJournal({
+      course: c.name,
+      node: "*",
+      rating: null,
+      kind: "content_reset",
+      elapsed_days: 0,
+      detail: `\u6574\u8BFE\u91CD\u7F6E\uFF1A${nodes.length} \u8282\u70B9\u7B14\u8BB0\u56DE draft\uFF1B\u79FB\u5165 .trash\uFF1A${trashed.join("\u3001") || "\uFF08\u65E0\uFF09"}`
+    });
+    return { course: c.name, nodes, trashed };
+  }
+  /** 单节正文落盘：门禁通过后按清单重组正文，该节置 ready/version+1；hints = enc 候选反哺提醒。 */
+  async contentSection(courseKey, node, sectionId, md) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[section] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    return this.content.sectionApply(c.root, graph, node, sectionId, md, (rec) => this.store.appendJournal({ ...rec, course: c.name }));
+  }
+  /** 节清单视图：manifest + 每节现正文（面板节进度/单节重写入口用；
+   * 无清单旧节点回退为整篇重导出，全部 ready）。 */
+  async contentSectionsView(courseKey, node) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[sections] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    const [, regionName] = graph.blockOf[node];
+    const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node));
+    const mdByTitle = /* @__PURE__ */ new Map();
+    for (const part of body.split(/^## /m).slice(1)) {
+      const nl = part.indexOf("\n");
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      if (title) mdByTitle.set(title, (nl >= 0 ? part.slice(nl + 1) : "").trim());
+    }
+    const manifest = state[node]?.content.sections ?? Content.manifestFromBody(body, 0);
+    return manifest.map((s) => ({ ...s, md: mdByTitle.get(s.title) ?? null }));
   }
   async contentFeedback(courseKey, node) {
     const c = await this.registry.resolve(courseKey);
@@ -12650,7 +13457,20 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
     const c = await this.registry.resolve(courseKey);
     const { graph, state } = await this.loadView(c);
     const lesson = await this.sessions.lesson(c.name, c.root, graph, state, node);
-    lesson.mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
+    const view = lesson;
+    view.mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
+    const manifest = state[node]?.content.sections ?? null;
+    view.manifest = manifest;
+    if (manifest?.length) {
+      const byTitle = new Map(manifest.map((s) => [s.title, s]));
+      for (const s of view.sections ?? []) {
+        const hit = byTitle.get(s.title);
+        if (hit) {
+          s.id = hit.id;
+          s.type = hit.type;
+        }
+      }
+    }
     return lesson;
   }
   // ---- note resolve / 反馈区读取 ----
@@ -12700,7 +13520,7 @@ ${gate.warns.map((w) => `  \u26A0 ${w}`).join("\n")}`);
             node: n.name,
             opt: n.opt,
             stage: effectiveStage(state, n.name),
-            mastery: state[n.name]?.mastery ?? 0,
+            mastery: masteryOfFm(state[n.name]),
             contentVersion: state[n.name]?.content.version ?? 0,
             contentStatus: state[n.name]?.content.status ?? "draft",
             path: this.sessions.notePath(c.root, graph, n.name),
@@ -13107,6 +13927,14 @@ ${String(q.answer)}`;
     const r = await this.bank.addQuestion(this.paths.courseRoot(c.root), node, question);
     return { course: c.name, node, ...r };
   }
+  /** 单题全量读取（含 answer/explanation）：修订/审题用——questionList 不带答案（作答流防泄题），改题前用这个看原题。 */
+  async questionGet(courseKey, node, qid) {
+    const c = await this.registry.resolve(courseKey);
+    const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
+    const q = bank.questions.find((x) => x.id === qid);
+    if (!q) throw new Error(`[question-get] \u300C${node}\u300D\u7684\u9898\u5E93\u6CA1\u6709 ${qid}\uFF08\u5171 ${bank.questions.length} \u9898\uFF09\u3002`);
+    return { course: c.name, node, question: q };
+  }
   async questionUpdate(courseKey, node, qid, patch) {
     const c = await this.registry.resolve(courseKey);
     await this.bank.updateQuestion(this.paths.courseRoot(c.root), node, qid, patch);
@@ -13118,8 +13946,10 @@ ${String(q.answer)}`;
     return { course: c.name, node, qid, archived };
   }
   /** AI 出题：节点正文 → 出题提示词 + llm → 产出的题库 YAML 逐题过 validateBank 门禁追加落盘。
-   * llm 由 host 注入（返回已剥围栏的纯文本）。骨架节点（无正文）直接报错。 */
-  async questionGenerate(courseKey, node, count, llm) {
+   * llm 由 host 注入（输出可能带 markdown 围栏，解析侧 parseModel 统一剥离）。骨架节点（无正文）直接报错。
+   * opts.sections = 节标注清单（逐节管线）：模型照抄清单节 id 进 section 字段；
+   * opts.generic = 只出跨节综合题（section 强制「通用」，逐节管线收尾用）。 */
+  async questionGenerate(courseKey, node, count, llm, opts) {
     const c = await this.registry.resolve(courseKey);
     const { graph } = await this.loadView(c);
     if (!graph.nset.has(node)) throw new Error(`[quiz] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
@@ -13128,7 +13958,13 @@ ${String(q.answer)}`;
     const body = note.body.replace(/^>\s*内容待生成。\s*$/m, "").trim();
     if (!body) throw new Error(`[quiz] \u300C${node}\u300D\u8FD8\u6CA1\u6709\u6B63\u6587\u2014\u2014\u5148\u300C\u751F\u6210\u6B63\u6587\u300D\u518D\u51FA\u9898\u3002`);
     const tpl = await this.loadPrompt("\u9898\u76EE\u751F\u6210");
-    const raw = await llm(`${tpl}
+    const listing = opts?.sections?.length ? `
+
+## \u8282\u6807\u6CE8\u6E05\u5355
+
+section \u5B57\u6BB5\u5FC5\u987B\u7CBE\u786E\u53D6\u81EA\u4E0B\u5217\u8282 id\uFF08\u8DE8\u8282\u7EFC\u5408\u9898\u5199\u300C\u901A\u7528\u300D\uFF09\uFF1A
+${opts.sections.map((s) => `- ${s.id} \uFF5C ${s.title}`).join("\n")}` : "";
+    const raw = await llm(`${tpl}${listing}
 
 ## \u9898\u76EE\u6570\u91CF
 
@@ -13137,7 +13973,7 @@ ${count} \u9053
 ---
 
 ${body}`);
-    const doc = YAML.parse(raw);
+    const doc = YAML.parseModel(raw);
     if (typeof doc !== "object" || doc === null || !Array.isArray(doc.questions) || !doc.questions.length) {
       throw new Error("[quiz] \u6A21\u578B\u6CA1\u6709\u4EA7\u51FA\u53EF\u7528\u9898\u76EE\uFF08questions \u4E3A\u7A7A\uFF09\u3002");
     }
@@ -13146,6 +13982,7 @@ ${body}`);
     for (const raw2 of doc.questions.slice(0, Math.max(1, count))) {
       const q = { ...raw2 };
       delete q.id;
+      if (opts?.generic) q.section = "\u901A\u7528";
       try {
         await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q);
         added++;
@@ -13156,6 +13993,101 @@ ${body}`);
     if (!added) throw new Error("[quiz] \u6A21\u578B\u4EA7\u51FA\u7684\u9898\u76EE\u5168\u90E8\u672A\u8FC7\u6821\u9A8C\u95E8\uFF08\u9898\u578B/\u7B54\u6848\u683C\u5F0F\u4E0D\u7B26\uFF09\uFF0C\u4E00\u9053\u90FD\u6CA1\u5165\u5E93\u3002");
     const bank = await this.bank.load(this.paths.courseRoot(c.root), node);
     return { course: c.name, node, added, skipped, total: bank.questions.length };
+  }
+  /** 逐节出题（逐节管线第 2 段）：每个内容节一次模型调用（出题量自适应：大纲含练习节 1 道，否则 2 道），
+   * section 服务端强制为该节 id；练习/交互节跳过，正文未生成的节（断点续跑）跳过。 */
+  async questionGenerateSections(courseKey, node, llm) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph, state } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[quiz] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    const manifest = state[node]?.content.sections;
+    if (!manifest?.length) throw new Error(`[quiz] \u300C${node}\u300D\u6CA1\u6709\u8282\u6E05\u5355\u2014\u2014\u5148\u8FD0\u884C\u5927\u7EB2\u3002`);
+    const [, regionName] = graph.blockOf[node];
+    const { body } = await loadNote(this.paths.courseNotePath(c.root, regionName, node));
+    const mdByTitle = /* @__PURE__ */ new Map();
+    for (const part of body.split(/^## /m).slice(1)) {
+      const nl = part.indexOf("\n");
+      const title = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      if (title) mdByTitle.set(title, (nl >= 0 ? part.slice(nl + 1) : "").trim());
+    }
+    const tpl = await this.loadPrompt("\u9898\u76EE\u751F\u6210");
+    const perSection = manifest.some((s) => s.type === "\u7EC3\u4E60") ? 1 : 2;
+    let added = 0;
+    let sections = 0;
+    for (const s of manifest) {
+      if (s.type === "\u7EC3\u4E60" || s.type === "\u4EA4\u4E92") continue;
+      const sectionMd = mdByTitle.get(s.title);
+      if (!sectionMd) continue;
+      sections++;
+      const raw = await llm(`${tpl}
+
+## \u8282\u6807\u6CE8\u6E05\u5355
+
+section \u5B57\u6BB5\u5FC5\u987B\u7CBE\u786E\u5199\u300C${s.id}\u300D\uFF08\u672C\u6279\u5168\u90E8\u9898\u76EE\u90FD\u5C5E\u4E8E\u8FD9\u4E00\u8282\uFF09\u3002
+
+## \u9898\u76EE\u6570\u91CF
+
+${perSection} \u9053
+
+---
+
+## ${s.title}
+
+${sectionMd}`);
+      let doc = null;
+      try {
+        doc = YAML.parseModel(raw);
+      } catch {
+        continue;
+      }
+      if (typeof doc !== "object" || doc === null || !Array.isArray(doc.questions)) continue;
+      for (const rawQ of doc.questions) {
+        const q = { ...rawQ ?? {}, section: s.id };
+        delete q.id;
+        try {
+          await this.bank.addQuestion(this.paths.courseRoot(c.root), node, q);
+          added++;
+        } catch {
+        }
+      }
+    }
+    return { course: c.name, node, added, sections };
+  }
+  /** 交互件成绩结算：面板 sandbox iframe 上报 LEARNHUB_COMPLETE → practice 流水 +
+   * 练习证据 EMA（复用题库作答链路；judge='interactive'、qid='interactive:<节id>'）。
+   * 同一节同日只记一次（防刷）；不碰题目 FSRS（交互件不是题库题），
+   * 节点掌握度仍是题库作答正确率，不随交互件成绩变化。 */
+  async interactiveSettle(courseKey, node, sectionId, score, detail) {
+    const c = await this.registry.resolve(courseKey);
+    const { graph } = await this.loadView(c);
+    if (!graph.nset.has(node)) throw new Error(`[interactive] \u8282\u70B9\u300C${node}\u300D\u4E0D\u5728\u56FE\u5185\u3002`);
+    if (!Number.isFinite(score)) throw new Error("[interactive] score \u5FC5\u987B\u662F\u6570\u5B57\u3002");
+    const clamped = Math.min(1, Math.max(0, score));
+    const qid = `interactive:${sectionId}`;
+    const today = todayStr();
+    const played = (await this.store.practiceAll()).some((r) => r.course === c.name && r.node === node && r.judge === "interactive" && r.qid === qid && r.ts.startsWith(today));
+    const mastery = await this.nodeMastery(this.paths.courseRoot(c.root), node);
+    if (played) return { settled: false, mastery };
+    await this.store.appendPractice({
+      course: c.name,
+      node,
+      ex: 0,
+      answer: detail ?? "",
+      correct: clamped >= PASS_SCORE,
+      judge: "interactive",
+      qid,
+      ...detail ? { feedback: detail } : {}
+    });
+    const [, regionName] = graph.blockOf[node];
+    const path = this.paths.courseNotePath(c.root, regionName, node);
+    const { fm: rawFm, body } = await loadNote(path);
+    const fm = asFm(rawFm);
+    if (fm) {
+      const next = applyPracticeEvidence(fm, clamped);
+      if (next.stage === "ready" || next.stage === "unseen") next.stage = "learning";
+      await saveNote(path, next, body);
+    }
+    return { settled: true, mastery };
   }
   /** 删除课程：注册表移除 + 课程目录移入 学习中心/.trash/（不真删，可手工找回）。 */
   async courseDelete(courseKey) {
@@ -13196,7 +14128,7 @@ ${body}`);
 // src/index.ts
 var name = "dsh-learnhub";
 var inject = ["tools", "webServer", "llm"];
-var llmCfg = { provider: "deepseek-official", model: "deepseek-v4-flash" };
+var llmCfg = { provider: "deepseek-official", model: "deepseek-v4-flash", fastEffort: "off" };
 var genJobs = /* @__PURE__ */ new Map();
 function persistGenJobs() {
   void engine.saveGenJobs([...genJobs.values()].map((j) => ({ ...j }))).catch(() => {
@@ -13209,6 +14141,7 @@ var LOG_LIMIT = 1500;
 var API = "/learnhub/api";
 var PAGE = "/learnhub";
 var PAGE_DIST = fileURLToPath(new URL("../web/dist/", import.meta.url));
+var VENDOR_DIST = fileURLToPath(new URL("../web/vendor/", import.meta.url));
 var FILE_MIME = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -13261,7 +14194,16 @@ async function apiRun(tool, fn) {
   await runLog(tool, typeof out === "string" ? out : JSON.stringify(out));
   return out;
 }
-async function llmComplete(ctx, prompt, system) {
+async function llmComplete(ctx, prompt, system, opts) {
+  if (opts?.effort === void 0) return llmStreamOnce(ctx, prompt, system);
+  try {
+    return await llmStreamOnce(ctx, prompt, system, opts.effort);
+  } catch (err) {
+    if (!(err instanceof Error && err.code === "UNSUPPORTED_REASONING_EFFORT")) throw err;
+    return llmStreamOnce(ctx, prompt, system);
+  }
+}
+async function llmStreamOnce(ctx, prompt, system, effort) {
   const msg = createUserMessage({
     source: { kind: "user" },
     content: [{ type: "text", text: prompt }]
@@ -13272,7 +14214,8 @@ async function llmComplete(ctx, prompt, system) {
     provider: llmCfg.provider,
     model: llmCfg.model,
     messages: [msg],
-    ...system === void 0 ? {} : { system }
+    ...system === void 0 ? {} : { system },
+    ...effort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(effort) }
   });
   for await (const chunk of stream) {
     if (chunk.type === "text-delta") text += chunk.text;
@@ -13280,7 +14223,9 @@ async function llmComplete(ctx, prompt, system) {
       if (chunk.reason.kind === "aborted") throw new Error("\u6A21\u578B\u8C03\u7528\u88AB\u53D6\u6D88");
       const f = chunk.reason.failure;
       const status = f.status ? `/${f.status}` : "";
-      throw new Error(`\u6A21\u578B\u8C03\u7528\u5931\u8D25[${f.code}${status}]\uFF1A${String(f.message)}`);
+      const e = new Error(`\u6A21\u578B\u8C03\u7528\u5931\u8D25[${f.code}${status}]\uFF1A${String(f.message)}`);
+      e.code = f.code;
+      throw e;
     }
     if (chunk.type === "finish" && chunk.reason.kind === "max-tokens") truncated = true;
   }
@@ -13289,11 +14234,24 @@ async function llmComplete(ctx, prompt, system) {
   return text.trim();
 }
 function stripFences(body) {
-  const m = body.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/);
+  const m = body.match(/^```(?:markdown|md|yaml|yml|json)?\s*\n([\s\S]*?)\n```\s*$/);
   return m ? m[1] : body;
 }
-async function generateQuiz(ctx, course, node, count) {
-  return engine.questionGenerate(course, node, count, async (prompt) => stripFences(await llmComplete(ctx, prompt)));
+async function generateQuiz(ctx, course, node, count, opts) {
+  return engine.questionGenerate(course, node, count, async (prompt) => stripFences(await llmComplete(ctx, prompt)), opts);
+}
+function sectionPrompt(tpl, pack, s) {
+  return `${tpl}
+
+## \u672C\u8282\u4EFB\u52A1
+
+- \u8282 id\uFF1A${s.id}
+- \u8282\u6807\u9898\uFF1A${s.title}
+- \u8282\u7C7B\u578B\uFF1A${s.type}
+
+---
+
+${pack}`;
 }
 async function generateContent(ctx, course, node, style) {
   const key = `${course}/${node}`;
@@ -13301,33 +14259,39 @@ async function generateContent(ctx, course, node, style) {
   if (existing && (existing.status === "running" || existing.status === "cancelling")) {
     throw new Error(`\u300C${node}\u300D\u6B63\u5728\u751F\u6210\u4E2D\uFF0C\u8BF7\u7A0D\u5019\u3002`);
   }
-  const promptKind = style ? `\u8BFE\u7A0B\u751F\u6210-${style}` : "\u8BFE\u7A0B\u751F\u6210";
-  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running", phase: "content", ...style ? { style } : {} };
+  const job = { course, node, startedAt: (/* @__PURE__ */ new Date()).toISOString(), status: "running", phase: "outline", ...style ? { style } : {} };
   genJobs.set(key, job);
   persistGenJobs();
   try {
     const pack = await engine.contentPack(course, node);
-    const tpl = await engine.loadPrompt(promptKind);
-    const body = stripFences(await llmComplete(ctx, `${tpl}
+    const sectionTpl = await engine.loadPrompt(style ? `\u8BFE\u7A0B\u8282\u751F\u6210-${style}` : "\u8BFE\u7A0B\u8282\u751F\u6210");
+    let views = await engine.contentSectionsView(course, node);
+    if (!views.some((s) => s.status === "ready")) {
+      const outlineTpl = await engine.loadPrompt("\u8BFE\u7A0B\u5927\u7EB2");
+      const outlineYaml = stripFences(await llmComplete(ctx, `${outlineTpl}
 
 ---
 
-${pack}`));
-    if (job.status === "cancelling") throw new Error("\u751F\u6210\u5DF2\u53D6\u6D88\uFF0C\u7ED3\u679C\u5DF2\u4E22\u5F03\u3002");
-    const res = await engine.contentApply(course, node, body);
-    job.phase = "quiz";
-    job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u4E2D\u2026`;
-    persistGenJobs();
-    try {
-      const quiz = await generateQuiz(ctx, course, node, 6);
-      job.status = "done";
-      job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898 ${quiz.added} \u9053\uFF08\u9898\u5E93\u5171 ${quiz.total}\uFF09`;
-    } catch (quizErr) {
-      job.status = "done";
-      job.message = `${res.message}\uFF1B\u81EA\u52A8\u51FA\u9898\u5931\u8D25\uFF08${quizErr instanceof Error ? quizErr.message : String(quizErr)}\uFF09\u2014\u2014\u53EF\u5728\u7EC3\u4E60\u9875\u5355\u72EC\u91CD\u8BD5`;
+${pack}`, void 0, { effort: llmCfg.fastEffort }));
+      if (job.status === "cancelling") throw new Error("\u751F\u6210\u5DF2\u53D6\u6D88\uFF0C\u7ED3\u679C\u5DF2\u4E22\u5F03\u3002");
+      await engine.contentOutline(course, node, outlineYaml);
+      views = await engine.contentSectionsView(course, node);
+      if (!views.length) throw new Error("[generate] \u5927\u7EB2\u6CA1\u6709\u4EA7\u51FA\u4EFB\u4F55\u8282\u3002");
     }
+    job.phase = "sections";
+    job.progress = { done: views.filter((s) => s.status === "ready").length, total: views.length };
     persistGenJobs();
-    return job.message;
+    for (const s of views) {
+      if (s.status === "ready") continue;
+      job.progress = { ...job.progress, current: s.title };
+      persistGenJobs();
+      const sectionMd = stripFences(await llmComplete(ctx, sectionPrompt(sectionTpl, pack, s), void 0, { effort: llmCfg.fastEffort }));
+      if (job.status === "cancelling") throw new Error("\u751F\u6210\u5DF2\u53D6\u6D88\uFF0C\u7ED3\u679C\u5DF2\u4E22\u5F03\u3002");
+      await engine.contentSection(course, node, s.id, sectionMd);
+      job.progress = { done: job.progress.done + 1, total: job.progress.total };
+      persistGenJobs();
+    }
+    return await finishWithQuiz(ctx, job, `\u300C${node}\u300D\u6B63\u6587\u5B8C\u6210\uFF08${job.progress.total} \u8282\uFF09`);
   } catch (err) {
     job.status = job.status === "cancelling" ? "cancelled" : "failed";
     job.message = err instanceof Error ? err.message : String(err);
@@ -13341,6 +14305,50 @@ ${pack}`));
       persistGenJobs();
     }, keep).unref();
   }
+}
+async function finishWithQuiz(ctx, job, contentMsg) {
+  job.phase = "quiz";
+  job.message = `${contentMsg}\uFF1B\u81EA\u52A8\u51FA\u9898\u4E2D\u2026`;
+  persistGenJobs();
+  try {
+    const per = await engine.questionGenerateSections(job.course, job.node, async (prompt) => stripFences(await llmComplete(ctx, prompt)));
+    const quiz = await generateQuiz(ctx, job.course, job.node, 3, { generic: true });
+    job.status = "done";
+    job.message = `${contentMsg}\uFF1B\u51FA\u9898 ${per.added + quiz.added} \u9053\uFF08\u8282\u7ED1 ${per.added} + \u7EFC\u5408 ${quiz.added}\uFF0C\u9898\u5E93\u5171 ${quiz.total}\uFF09`;
+  } catch (quizErr) {
+    job.status = "done";
+    job.message = `${contentMsg}\uFF1B\u81EA\u52A8\u51FA\u9898\u5931\u8D25\uFF08${quizErr instanceof Error ? quizErr.message : String(quizErr)}\uFF09\u2014\u2014\u53EF\u5728\u7EC3\u4E60\u9875\u5355\u72EC\u91CD\u8BD5`;
+  }
+  persistGenJobs();
+  return job.message;
+}
+async function generateSection(ctx, course, node, sectionId) {
+  const pack = await engine.contentPack(course, node);
+  const views = await engine.contentSectionsView(course, node);
+  const s = views.find((v) => v.id === sectionId);
+  if (!s) throw new Error(`\u300C${node}\u300D\u6CA1\u6709\u8282\u300C${sectionId}\u300D\u2014\u2014\u5148\u8FD0\u884C\u5927\u7EB2\u3002`);
+  const sectionTpl = await engine.loadPrompt("\u8BFE\u7A0B\u8282\u751F\u6210");
+  const sectionMd = stripFences(await llmComplete(ctx, sectionPrompt(sectionTpl, pack, s), void 0, { effort: llmCfg.fastEffort }));
+  const r = await engine.contentSection(course, node, sectionId, sectionMd);
+  return `[section] \u300C${r.title}\u300Dv${r.version} \u843D\u76D8\u3002`;
+}
+async function resetCourseChain(ctx, courseKey) {
+  const running = [...genJobs.values()].filter((j) => j.course === courseKey && (j.status === "running" || j.status === "cancelling"));
+  if (running.length) throw new Error(`\u8BFE\u7A0B\u300C${courseKey}\u300D\u6709 ${running.length} \u4E2A\u751F\u6210\u4EFB\u52A1\u8FDB\u884C\u4E2D\uFF0C\u5148\u53D6\u6D88\u6216\u7B49\u5B8C\u6210\u518D\u91CD\u751F\u6210\u3002`);
+  const c = await engine.resolveCourse(courseKey);
+  const { graph } = await engine.loadView(c);
+  const reset = await engine.contentReset(c.name);
+  for (const [key, j] of genJobs.entries()) if (j.course === c.name) genJobs.delete(key);
+  persistGenJobs();
+  let chain = Promise.resolve();
+  let queued = 0;
+  for (const node of graph.order.length ? graph.order : graph.names) {
+    queued++;
+    chain = chain.then(() => generateContent(ctx, c.name, node).catch(() => {
+    }));
+  }
+  void chain;
+  return { reset, queued };
 }
 async function generationStatus() {
   const out = [];
@@ -13369,6 +14377,12 @@ async function tutorChat(ctx, course, node, history) {
   const transcript = turns.map((h) => `${h.role === "assistant" ? "[AI \u8001\u5E08]" : "[\u5B66\u4E60\u8005]"} ${h.content}`).join("\n\n");
   const system = `\u4F60\u662F learnhub \u7684 AI \u8001\u5E08\uFF0C\u6B63\u5728\u8F85\u5BFC\u5B66\u4E60\u8005\u653B\u514B\u4E00\u4E2A\u8BFE\u7A0B\u8282\u70B9\u3002\u53EA\u4F9D\u636E\u4E0B\u9762\u7684\u8BFE\u7A0B\u4E0A\u4E0B\u6587\u4E0E\u672C\u8BFE\u8303\u56F4\u56DE\u7B54\uFF1B\u8D85\u51FA\u8303\u56F4\u7684\u8FFD\u95EE\u7ED9\u4E00\u53E5\u6982\u62EC\u5E76\u5EFA\u8BAE\u56DE\u5230\u8BFE\u7A0B\u4E3B\u7EBF\u3002\u56DE\u7B54\u7528 Markdown\uFF0C\u7B80\u6D01\u76F4\u63A5\uFF0C\u516C\u5F0F\u7528 KaTeX\uFF08$...$\uFF09\u3002
 
+\u82E5\u9875\u9762\u4E0A\u6709\u4EA4\u4E92\u6A21\u62DF\u4EF6\u4E14\u6F14\u793A\u80FD\u5E2E\u52A9\u7406\u89E3\uFF0C\u53EF\u5728\u56DE\u7B54\u672B\u5C3E\u9644\u4E00\u4E2A learnhub-teacher \u52A8\u4F5C\u5757\uFF08\u666E\u901A\u56DE\u7B54\u4E0D\u8981\u8F93\u51FA\uFF09\uFF1A
+\`\`\`learnhub-teacher
+{ "action": "highlight|setState|reveal|annotate", "selector": "#\u5143\u7D20CSS\u9009\u62E9\u5668", "state": {"\u53D8\u91CF\u540D": \u503C}, "text": "\u6279\u6CE8\u6587\u5B57" }
+\`\`\`
+\u9762\u677F\u4F1A\u628A\u5757\u8F6C\u6210\u300C\u5728\u4EA4\u4E92\u4EF6\u4E0A\u6F14\u793A\u300D\u6309\u94AE\u5E76\u5E7F\u64AD\u7ED9\u672C\u9875\u5168\u90E8\u4EA4\u4E92\u4EF6\uFF1Bhighlight/reveal \u9700 selector\uFF0Cannotate \u9700 text\uFF0CsetState \u9700 state\uFF08\u53D8\u91CF\u540D\u4E0E\u4EA4\u4E92\u4EF6\u6ED1\u6746\u4E00\u81F4\uFF09\u3002
+
 ${pack}`;
   return llmComplete(ctx, `${transcript}
 
@@ -13391,6 +14405,17 @@ function need(body, key) {
   const v = body[key];
   if (typeof v !== "string" || !v.trim()) throw new Error(`missing required field: ${key}`);
   return v.trim();
+}
+function injectKatexIfMathed(html) {
+  if (!/\$\$|\\\(|\\\[/.test(html) || /katex/i.test(html)) return html;
+  const inject2 = [
+    '<link rel="stylesheet" href="/learnhub/api/vendor/katex/katex.min.css">',
+    '<script src="/learnhub/api/vendor/katex/katex.min.js"></script>',
+    '<script src="/learnhub/api/vendor/katex/contrib/auto-render.min.js"></script>',
+    '<script>document.addEventListener("DOMContentLoaded",function(){window.renderMathInElement(document.body,{delimiters:[{left:"$$",right:"$$",display:true},{left:"$",right:"$",display:false}],throwOnError:false})})</script>'
+  ].join("\n");
+  const head = html.toLowerCase().indexOf("</head>");
+  return head === -1 ? html + inject2 : html.slice(0, head) + inject2 + "\n" + html.slice(head);
 }
 async function handleApi(ctx, req, res) {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -13456,12 +14481,31 @@ async function handleApi(ctx, req, res) {
       res.end(buf);
       return;
     }
+    if (req.method === "GET" && route.startsWith("/vendor/")) {
+      const rel = decodeURIComponent(route.slice("/vendor/".length)).replace(/\\/g, "/");
+      if (!rel || rel.includes("..")) throw new Error("path traversal rejected");
+      const ext = rel.slice(rel.lastIndexOf(".")).toLowerCase();
+      const mime = ASSET_MIME[ext];
+      if (!mime) throw new Error(`unsupported vendor file type: ${ext || "(none)"}`);
+      const file = resolvePath(VENDOR_DIST, rel);
+      if (!(file + sep).startsWith(VENDOR_DIST)) throw new Error("path traversal rejected");
+      let buf;
+      try {
+        buf = await readFile11(file);
+      } catch {
+        sendJson(res, 404, { error: `vendor file not found: ${rel}` });
+        return;
+      }
+      res.writeHead(200, { "content-type": mime, "cache-control": "public, max-age=86400" });
+      res.end(buf);
+      return;
+    }
     if (req.method === "GET" && route === "/interactive") {
       const p = url.searchParams.get("path");
       if (!p) throw new Error("missing required field: path");
-      const rel = p.replace(/\\/g, "/").replace(/^\/+/, "");
-      if (rel.includes("..")) throw new Error("path traversal rejected");
-      if (!rel.startsWith(`${CENTER_REL}/`)) throw new Error("interactive \u5FC5\u987B\u4F4D\u4E8E\u5B66\u4E60\u4E2D\u5FC3\u5185");
+      const raw = p.replace(/\\/g, "/").replace(/^\/+/, "");
+      if (raw.includes("..")) throw new Error("path traversal rejected");
+      const rel = raw.startsWith(`${CENTER_REL}/`) ? raw : `${CENTER_REL}/${raw}`;
       const courseRoot = rel.slice(CENTER_REL.length + 1).split("/")[0];
       if (!(await engine.enabledCourses()).some((c) => c.root === courseRoot)) {
         throw new Error(`interactive \u4E0D\u5728\u4EFB\u4F55\u542F\u7528\u8BFE\u7A0B\u7684\u6839\u5185: ${courseRoot}`);
@@ -13476,10 +14520,10 @@ async function handleApi(ctx, req, res) {
       }
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
-        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:",
+        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src data: blob: 'self'; font-src data: 'self'",
         "cache-control": "no-store"
       });
-      res.end(buf);
+      res.end(injectKatexIfMathed(buf.toString("utf8")));
       return;
     }
     if (req.method === "GET" && route === "/note") {
@@ -13561,6 +14605,27 @@ async function handleApi(ctx, req, res) {
         sendJson(res, 200, await apiRun("api/generate", async () => ({
           message: await generateContent(ctx, need(body, "course"), need(body, "node"), style)
         })));
+        return;
+      }
+      if (route === "/generate/section") {
+        sendJson(res, 200, await apiRun("api/generate/section", async () => ({
+          message: await generateSection(ctx, need(body, "course"), need(body, "node"), need(body, "section"))
+        })));
+        return;
+      }
+      if (route === "/course/reset") {
+        sendJson(res, 200, await apiRun("api/course/reset", async () => resetCourseChain(ctx, need(body, "course"))));
+        return;
+      }
+      if (route === "/interactive/settle") {
+        const score = Number(body.score);
+        sendJson(res, 200, await apiRun("api/interactive/settle", () => engine.interactiveSettle(
+          need(body, "course"),
+          need(body, "node"),
+          need(body, "section"),
+          Number.isFinite(score) ? score : 0,
+          typeof body.detail === "string" ? body.detail : void 0
+        )));
         return;
       }
       if (route === "/tutor") {
@@ -13666,6 +14731,8 @@ function apply(ctx, config) {
         startedAt: typeof j.startedAt === "string" ? j.startedAt : (/* @__PURE__ */ new Date()).toISOString(),
         status: interrupted ? "failed" : j.status ?? "failed",
         ...j.phase ? { phase: j.phase } : {},
+        ...j.progress ? { progress: j.progress } : {},
+        ...j.style ? { style: j.style } : {},
         message: interrupted ? "\u8FDB\u7A0B\u91CD\u542F\uFF0C\u4EFB\u52A1\u4E2D\u65AD\u2014\u2014\u53EF\u91CD\u8BD5" : typeof j.message === "string" ? j.message : void 0
       });
     }
@@ -13674,6 +14741,7 @@ function apply(ctx, config) {
   });
   if (config?.provider) llmCfg.provider = config.provider;
   if (config?.model) llmCfg.model = config.model;
+  if (config?.fastEffort) llmCfg.fastEffort = config.fastEffort;
   const textOutput = {
     schema: { type: "string" },
     render: (_args, value) => [{ type: "text", text: String(value) }]
@@ -13746,7 +14814,7 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_graph_analyze",
-    "Analyze a course knowledge graph: structural stats, unreachable nodes, bottlenecks, lapse hotspots, plus cytoscape render elements. Returns JSON. Run this before proposing graph edits.",
+    "Analyze a course knowledge graph: structural stats, unreachable nodes, bottlenecks, lapse hotspots, graph health score (0-100, see health), next-batch suggestions (suggestions.expand_blocks/missing_pre/unconverged), the full per-node schema (schema: pre/enc/est/bloom/difficulty/note per node \u2014 the data basis for edge-level self-checks), plus cytoscape render elements. Returns JSON. Run before planning each batch of graph edits; the next-batch plan must cite concrete entries from health/suggestions.",
     {
       course: { type: "string", description: "Course name; omit when only one course is enabled" },
       elementsOnly: { type: "boolean", description: "Only output cytoscape render elements (nodes/edges)" }
@@ -13754,8 +14822,37 @@ function apply(ctx, config) {
     (args) => run("learnhub_graph_analyze", async () => JSON.stringify(await engine.graphAnalyze(args.course, args.elementsOnly)))
   );
   tool(
+    "learnhub_graph_node",
+    "Inspect one graph node in depth: schema field values (pre/est/type/bloom/difficulty/note), direct successors, enc component-skill edges with weights and notes, block placement, learning stage/content status, and the full transitive prerequisite closure (sorted deepest-first). Use to drill into a single node without pulling the whole graph.",
+    {
+      course: { type: "string", description: "Course name; omit when only one course is enabled" },
+      node: { type: "string", required: true, description: "Node name" }
+    },
+    (args) => run("learnhub_graph_node", async () => JSON.stringify(await engine.graphNode(args.course, args.node)))
+  );
+  tool(
+    "learnhub_graph_browse",
+    "Browse a course graph by region and/or block: node listings with depth/stage/est/difficulty/type/content status. Omit both filters to list every region (structure overview); give region (and optionally block) to explore one area. Unknown region names fail loud with the valid list.",
+    {
+      course: { type: "string", description: "Course name; omit when only one course is enabled" },
+      region: { type: "string", description: "Region name filter" },
+      block: { type: "string", description: "Block name filter (requires region when ambiguous)" }
+    },
+    (args) => run("learnhub_graph_browse", async () => JSON.stringify(await engine.graphBrowse(args.course, args.region, args.block)))
+  );
+  tool(
+    "learnhub_graph_path",
+    "Ask whether one node is a (transitive) prerequisite of another and via which chain: returns related, direct, the BFS shortest chain from\u2192\u2026\u2192to, the full prerequisite-closure size of `to`, and the depth span. Use for teaching-path planning and for explaining why something is locked.",
+    {
+      course: { type: "string", description: "Course name; omit when only one course is enabled" },
+      from: { type: "string", required: true, description: "Candidate prerequisite node" },
+      to: { type: "string", required: true, description: "Target node" }
+    },
+    (args) => run("learnhub_graph_path", async () => JSON.stringify(await engine.graphPath(args.course, args.from, args.to)))
+  );
+  tool(
     "learnhub_graph_propose",
-    "Submit a graph proposal for human review. kind=gen: full course graph YAML (course/mode/regions/blocks/nodes/pre); kind=edit: change ops (add_node/del_node/set_pre/rename/move/set_note). Schema + structure gates reject bad YAML; accepted proposals become pending until applied.",
+    "Submit a graph proposal for human review. kind=gen: full course graph YAML (course/mode/regions/blocks/nodes/pre); kind=edit: change ops (add_node/del_node/set_pre/set_enc/rename/move/set_note). add_node may carry optional per-node fields: est (minutes), type: practice, bloom (\u8BB0\u5FC6/\u7406\u89E3/\u5E94\u7528/\u5206\u6790/\u8BC4\u4EF7/\u521B\u9020), difficulty (1-5), enc (component-skill edges, same shape as the graph YAML) \u2014 keep difficulty jumps across pre edges under 2 or the audit flags R11. set_enc replaces a node's whole enc edge list (string item = weight 1, or {node,w,note}). Schema + structure gates reject bad YAML (including dangling enc edges); accepted proposals become pending until applied.",
     {
       kind: { type: "string", required: true, description: '"gen" (new/append course graph) or "edit" (change ops)' },
       yaml: { type: "string", required: true, description: "Full proposal YAML text (GenProposal or EditProposal schema)" }
@@ -13763,8 +14860,17 @@ function apply(ctx, config) {
     (args) => run("learnhub_graph_propose", async () => JSON.stringify(await engine.graphPropose(args.kind === "edit" ? "edit" : "gen", args.yaml)))
   );
   tool(
+    "learnhub_graph_proposals",
+    "List graph proposals (gen/edit) by status \u2014 use status=pending to see what awaits human review in the panel, with the proposal id, course, reason, and op summary. After the user decides in the panel, apply with learnhub_graph_apply using that id.",
+    {
+      status: { type: "string", description: "Filter by status (default pending; e.g. applied/rejected)" },
+      kind: { type: "string", description: "Filter by kind: gen or edit" }
+    },
+    (args) => run("learnhub_graph_proposals", async () => JSON.stringify(await engine.graphProposals(args.status, args.kind)))
+  );
+  tool(
     "learnhub_graph_apply",
-    "Decide a pending graph proposal after human review: apply (audit-gated, writes data/*.yaml with rename linkage + journal + snapshot) or reject (kept on record).",
+    "Decide a pending graph proposal after human review: apply (audit-gated, writes data/*.yaml with rename linkage + journal + snapshot) or reject (kept on record). The apply result carries findings: audit warns plus a health-score hint when below the skill exit threshold \u2014 address them in the next batch.",
     {
       kind: { type: "string", required: true, description: '"gen" or "edit"' },
       id: { type: "number", description: "Proposal id; omit for the latest pending of this kind" },
@@ -13782,13 +14888,70 @@ function apply(ctx, config) {
   );
   tool(
     "learnhub_generate",
-    "Generate one course note via the model: assembles the context pack (prereqs, domain boundary, forbidden concepts) + the user-editable prompt template (state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210.md), calls the model, and applies the result through the quality gates as a draft (status=draft, awaiting human review). Missing notes are scaffolded first (on-demand lesson semantics). style selects a prompt variant (e.g. \u82CF\u683C\u62C9\u5E95/\u8D39\u66FC; built-ins listed by GET /prompts, custom ones live at state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u751F\u6210-<style>.md).",
+    "Generate one course note via the model: outline first (the model decides section split, order, and types from the content, topic, and style \u2014 no fixed structure), then one model call per section through the quality gates as a draft (ready sections are skipped, so retrying resumes the pipeline), then per-section + synthesis quiz questions. The context pack (prereqs, domain boundary, forbidden concepts) and user-editable prompt templates (state/\u63D0\u793A\u8BCD/\u8BFE\u7A0B\u5927\u7EB2.md, \u8BFE\u7A0B\u8282\u751F\u6210.md) drive the calls. Missing notes are scaffolded first (on-demand lesson semantics). style selects a per-section prompt variant (\u8BFE\u7A0B\u8282\u751F\u6210-<style>, e.g. \u82CF\u683C\u62C9\u5E95/\u8D39\u66FC) applied to every section call; the outline and gates stay on the default path.",
     {
       course: { type: "string", required: true, description: "Course name" },
       node: { type: "string", required: true, description: "Node name to generate" },
       style: { type: "string", description: "Prompt style variant; omit for the default template" }
     },
     (args) => run("learnhub_generate", () => generateContent(ctx, args.course, args.node, args.style))
+  );
+  tool(
+    "learnhub_course_reset",
+    "Reset one course for full regeneration: all node notes are backed up into .trash/regenerate-<ts>/ and rewritten as ungenerated skeletons; the question bank, interactive artifacts, and generated-image dirs move into the same backup. The graph, learning progress, and prompt snapshots are kept. Regeneration then runs as a background chain over all nodes in graph topological order (each node: outline \u2192 sections \u2192 quiz) and this call returns immediately with the queued count; progress shows in the panel generate tab. Refuses while generation tasks are running. Destructive but recoverable \u2014 confirm with the user before calling.",
+    { course: { type: "string", required: true, description: "Course name" } },
+    (args) => run("learnhub_course_reset", async () => {
+      const r = await resetCourseChain(ctx, args.course);
+      return JSON.stringify({ message: `\u5DF2\u91CD\u7F6E\u300C${args.course}\u300D\uFF08${r.reset.nodes.length} \u8282\u70B9\uFF09\uFF0C${r.queued} \u4E2A\u8282\u70B9\u5DF2\u5165\u961F\u91CD\u65B0\u751F\u6210\uFF08\u540E\u53F0\u94FE\uFF0C\u8FDB\u5EA6\u770B\u4EFB\u52A1\u6CE8\u518C\u8868\uFF09`, reset: r.reset, queued: r.queued });
+    })
+  );
+  tool(
+    "learnhub_course_delete",
+    "Delete one course: remove it from the course registry and move the whole course directory into \u5B66\u4E60\u4E2D\u5FC3/.trash/ (recoverable by hand). Learning progress lives inside the course directory, so it goes too. Destructive \u2014 confirm with the user before calling; for a content-only redo prefer learnhub_course_reset (keeps the graph and progress).",
+    { course: { type: "string", required: true, description: "Course name" } },
+    (args) => run("learnhub_course_delete", async () => JSON.stringify(await engine.courseDelete(args.course)))
+  );
+  tool(
+    "learnhub_question_generate",
+    "Generate quiz questions for a node via the model \u2014 the same pipeline as the auto-quiz: node body \u2192 question prompt \u2192 llm \u2192 validateBank gate appends every question to the bank. Use when a node has no/too few questions.",
+    {
+      course: { type: "string", required: true, description: "Course name" },
+      node: { type: "string", required: true, description: "Node name (must have generated content)" },
+      count: { type: "number", description: "Question count cap (default 6)" }
+    },
+    (args) => run("learnhub_question_generate", async () => {
+      const n = Number.isInteger(args.count) && args.count > 0 ? args.count : 6;
+      return JSON.stringify(await generateQuiz(ctx, args.course, args.node, n));
+    })
+  );
+  tool(
+    "learnhub_question_update",
+    "Update one bank question: patch merges into the stored question (q/options/answer/explanation/difficulty/section/uses) and the bank re-validates before writing; patch {archived:true|false} hides/restores it instead. learnhub_question_list omits answers \u2014 take corrections from the user or the note content, not from thin air.",
+    {
+      course: { type: "string", required: true, description: "Course name" },
+      node: { type: "string", required: true, description: "Node name" },
+      qid: { type: "string", required: true, description: 'Question id inside the bank, e.g. "q1"' },
+      patch: { type: "object", required: true, description: 'Fields to merge, e.g. {"answer":"A","explanation":"\u2026"} or {"archived":true}' }
+    },
+    (args) => run("learnhub_question_update", async () => {
+      if (typeof args.patch.archived === "boolean") {
+        await engine.questionArchive(args.course, args.node, args.qid, args.patch.archived);
+        const { archived: _a, ...rest } = args.patch;
+        if (Object.keys(rest).length) await engine.questionUpdate(args.course, args.node, args.qid, rest);
+        return JSON.stringify({ course: args.course, node: args.node, qid: args.qid, archived: args.patch.archived });
+      }
+      return JSON.stringify(await engine.questionUpdate(args.course, args.node, args.qid, args.patch));
+    })
+  );
+  tool(
+    "learnhub_question_get",
+    "Read one bank question in full, including answer, explanation, difficulty, section, and uses \u2014 the revision/authoring companion to learnhub_question_list (which omits answers on purpose for the answering flow). Read the original before correcting a question with learnhub_question_update.",
+    {
+      course: { type: "string", description: "Course name; omit when only one course is enabled" },
+      node: { type: "string", required: true, description: "Node name" },
+      qid: { type: "string", required: true, description: 'Question id inside the bank, e.g. "q1"' }
+    },
+    (args) => run("learnhub_question_get", async () => JSON.stringify(await engine.questionGet(args.course, args.node, args.qid)))
   );
   tool(
     "learnhub_content_check",
@@ -13871,7 +15034,7 @@ function apply(ctx, config) {
     }),
     "learnhub: panel SPA (web/dist)"
   );
-  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 15 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`);
+  console.log(`[learnhub] plugin loaded: vault=${VAULT}, center=${VAULT}/${CENTER_REL}, 25 tools registered (pure TS engine), page at ${PAGE}, API at ${API}/*`);
   void engine.statusJson().then((doc) => console.log(`[learnhub] self-check status OK (${JSON.stringify(doc).length} bytes)`)).catch((err) => console.error(`[learnhub] self-check FAILED: ${err instanceof Error ? err.message : String(err)}`));
 }
 export {

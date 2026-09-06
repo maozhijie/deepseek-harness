@@ -6,9 +6,13 @@
  * 行内/独立公式（$…$、$$…$$）不占代码块，由 MdView 的 remark-math 链处理。
  */
 import type { ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
-import { Tag } from '@arco-design/web-react'
+import { useContext, useEffect, useRef, useState } from 'react'
+import { Message, Tag } from '@arco-design/web-react'
+import { api } from '../api'
 import { RENDERERS } from '../../../shared/content-renderers'
+import { SettleContext } from './settle-context'
+import { ChartBlock, PlotBlock, SvgBlock } from './visual-blocks'
+import { useWidgetBus } from './widget-bus'
 
 /** Mermaid 图（主题跟随 arco-theme；失败降级源码）。 */
 function MermaidBlock({ code }: { code: string }) {
@@ -60,18 +64,37 @@ function MediaBlock({ code }: { code: string }) {
 }
 
 /** 交互模拟块：sandbox iframe 内嵌 vault 交互件（```interactive 块，首行 vault 相对路径）。
- * 协议：交互件 postMessage({type:'LEARNHUB_COMPLETE'}) → 显示「交互已完成」徽标；
+ * 协议：交互件 postMessage({type:'LEARNHUB_COMPLETE', score?, detail?}) → 亮徽标；
+ * 会话内（SettleContext，交互节轮）且带 score 时上报 /interactive/settle 入练习档案
+ * （同节同日一次，防刷在服务端）；自由阅读（无上下文）只亮徽标。
  * postMessage({type:'SHOW_ANNOTATION', content}) → 块顶浮层展示 AI 标注文字（8s 自动消失）。 */
 function InteractiveBlock({ code }: { code: string }) {
   const path = code.split('\n').map(s => s.trim()).filter(Boolean)[0]
+  const settle = useContext(SettleContext)
+  const bus = useWidgetBus()
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const [done, setDone] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 成绩只上报一次（iframe 内重复完成不重复计分；上报失败回置允许重试）。 */
+  const settledRef = useRef(false)
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      const data = e.data as { type?: string; content?: string } | null
+      const data = e.data as { type?: string; content?: string; score?: unknown; detail?: unknown } | null
       if (!data || typeof data !== 'object') return
-      if (data.type === 'LEARNHUB_COMPLETE') setDone(true)
+      if (data.type === 'LEARNHUB_COMPLETE') {
+        setDone(true)
+        const detail = typeof data.detail === 'string' && data.detail.trim() ? data.detail.trim() : undefined
+        if (detail) setResult(detail)
+        const score = typeof data.score === 'number' && Number.isFinite(data.score) ? data.score : undefined
+        if (settle && score !== undefined && !settledRef.current) {
+          settledRef.current = true
+          void api.interactiveSettle(settle.course, settle.node, settle.sectionId, score, detail)
+            .then(r => { if (r.settled) Message.success('交互成绩已记入练习档案') })
+            .catch(() => { settledRef.current = false })
+        }
+      }
       if (data.type === 'SHOW_ANNOTATION' && typeof data.content === 'string' && data.content.trim()) {
         setNote(data.content.trim())
         if (noteTimer.current) clearTimeout(noteTimer.current)
@@ -83,7 +106,12 @@ function InteractiveBlock({ code }: { code: string }) {
       window.removeEventListener('message', onMessage)
       if (noteTimer.current) clearTimeout(noteTimer.current)
     }
-  }, [])
+  }, [settle])
+  // AI 老师广播通道：注册发送器（iframe 未加载完成时 postMessage 静默丢弃；动作总在加载后触发，无需等 onLoad）
+  useEffect(() => {
+    if (!bus) return
+    return bus.register(msg => iframeRef.current?.contentWindow?.postMessage(msg, '*'))
+  }, [bus])
   if (!path) return <pre className='md-interactive-fallback'><code>{code}</code></pre>
   const src = `/learnhub/api/interactive?path=${encodeURIComponent(path.replace(/\\/g, '/'))}`
   return (
@@ -96,11 +124,12 @@ function InteractiveBlock({ code }: { code: string }) {
         }}>{note}</div>
       )}
       <iframe
+        ref={iframeRef}
         sandbox='allow-scripts' src={src} title='交互模拟' loading='lazy'
         style={{ width: '100%', minHeight: 380, border: '1px solid var(--color-border-2,#e5e6eb)', borderRadius: 8 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {done
-          ? <Tag size='small' color='green'>交互已完成</Tag>
+          ? <Tag size='small' color='green'>{result ? `交互已完成：${result}` : '交互已完成'}</Tag>
           : <Tag size='small' color='gray'>动手玩一玩上面的模拟（完成交互后这里会亮起）</Tag>}
       </div>
     </div>
@@ -112,11 +141,15 @@ interface RendererImpl {
   render: (code: string) => ReactNode
 }
 
-/** 注册表：shared 清单里占代码块的格式在此实现（math 走 remark 插件链，不在此）。 */
+/** 注册表：shared 清单里占代码块的格式在此实现（math 走 remark 插件链，不在此；
+ * svg/plot/chart 实现在 visual-blocks.tsx）。 */
 const BLOCK_RENDERERS: RendererImpl[] = [
   { lang: 'mermaid', render: code => <MermaidBlock code={code} /> },
   { lang: 'media', render: code => <MediaBlock code={code} /> },
   { lang: 'interactive', render: code => <InteractiveBlock code={code} /> },
+  { lang: 'svg', render: code => <SvgBlock code={code} /> },
+  { lang: 'plot', render: code => <PlotBlock code={code} /> },
+  { lang: 'chart', render: code => <ChartBlock code={code} /> },
 ]
 
 /** lang → 渲染结果；未注册返回 null（调用方降级源码）。 */

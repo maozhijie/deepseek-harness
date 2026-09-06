@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
+import 'katex/contrib/mhchem' // \ce 等化学宏注册进 rehype-katex 共享的 katex 实例
 import 'katex/dist/katex.min.css'
 import { renderBlock, verifyRendererCoverage } from './renderers'
 
@@ -20,6 +21,15 @@ const REHYPE_PLUGINS = [rehypeKatex]
 /** 行内场景段落降为 span：<p> 的块级默认会撑断 Radio/Text 的行内布局。 */
 function pToSpan(props: { children?: ReactNode }) {
   return <span>{props.children}</span>
+}
+
+/** 代码块分发（MdView 与 InlineMd 共用）：注册表命中按 lang 渲染，未注册降级源码。 */
+function MdCode(props: { className?: string; children?: ReactNode }) {
+  const text = String(props.children ?? '').replace(/\n$/, '')
+  const lang = /language-([\w-]+)/.exec(props.className ?? '')?.[1] ?? ''
+  const rendered = renderBlock(lang, text)
+  if (rendered !== null) return rendered
+  return <code className={props.className}>{props.children}</code>
 }
 
 /** Obsidian 嵌入语法 → 标准 markdown 图片（面板 /file 路由伺服 vault 相对路径）。 */
@@ -38,15 +48,7 @@ export default function MdView(props: { md: string; className?: string }) {
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
-        components={{
-          code({ className: cls, children, ...rest }) {
-            const text = String(children ?? '').replace(/\n$/, '')
-            const lang = /language-([\w-]+)/.exec(cls ?? '')?.[1] ?? ''
-            const rendered = renderBlock(lang, text)
-            if (rendered !== null) return rendered
-            return <code className={cls} {...rest}>{children}</code>
-          },
-        }}
+        components={{ code: MdCode }}
       >
         {md}
       </ReactMarkdown>
@@ -56,14 +58,15 @@ export default function MdView(props: { md: string; className?: string }) {
 
 /** 题干/选项/判卷反馈等短文本的 Markdown+公式渲染（与 MdView 同一条 remark-math
  * 链）：段落降为 span 保持行内布局；外层 pre-wrap 保留原文换行（commonmark
- * 软换行在输出文本里是 \n，常规 white-space 下折叠成空格）。 */
+ * 软换行在输出文本里是 \n，常规 white-space 下折叠成空格）。代码块同走
+ * renderBlock——题干/解析可携带 svg/plot/chart 图。 */
 export function InlineMd(props: { text: string }) {
   return (
     <span style={{ whiteSpace: 'pre-wrap' }}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
-        components={{ p: pToSpan }}
+        components={{ p: pToSpan, code: MdCode }}
       >{props.text}</ReactMarkdown>
     </span>
   )

@@ -4,14 +4,15 @@
  * + 跳过（已有基础）；按状态引导下一步（无正文→生成正文自动出题；有正文无题→
  * AI 出题）；生成/出题进行中轮询任务状态；「在图中查看」低频跳转。
  * 掌握度 = 该节点题目的作答正确率汇总（无自评）。 */
-import { Button, Card, Collapse, Empty, Input, Message, Modal, Space, Spin, Tag, Typography } from '@arco-design/web-react'
+import { Button, Card, Collapse, Empty, Input, Message, Modal, Space, Spin, Tag, Tooltip, Typography } from '@arco-design/web-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import MdView from './MdView'
 import PracticeFlow from './PracticeFlow'
 import TutorDrawer from './TutorDrawer'
+import { WidgetBusProvider } from './widget-bus'
 import { api, discussInHost } from '../api'
 import type { AppFrame } from '../App'
-import type { GenJobItem, QuestionItem } from '../types'
+import type { GenJobItem, LessonSection, QuestionItem, SectionManifestItem } from '../types'
 
 const { Text, Title } = Typography
 
@@ -26,7 +27,8 @@ const STAGE_LABEL: Record<string, { label: string; color: string }> = {
 
 export default function LessonView(props: { course: string; node: string; frame: AppFrame }) {
   const { course, node, frame } = props
-  const [sections, setSections] = useState<Array<{ title: string; md: string }> | null>(null)
+  const [sections, setSections] = useState<LessonSection[] | null>(null)
+  const [manifest, setManifest] = useState<SectionManifestItem[] | null>(null)
   const [stage, setStage] = useState<string | null>(null)
   const [mastery, setMastery] = useState(0)
   const [questions, setQuestions] = useState<QuestionItem[] | null>(null)
@@ -51,6 +53,7 @@ export default function LessonView(props: { course: string; node: string; frame:
         api.questions(course, node).catch(() => null),
       ])
       setSections(lesson?.sections ?? [])
+      setManifest(lesson?.manifest ?? null)
       setStage(lesson?.stage ?? null)
       setMastery(bank?.mastery ?? 0)
       setQuestions(bank?.questions ?? [])
@@ -169,6 +172,20 @@ export default function LessonView(props: { course: string; node: string; frame:
     }
   }
 
+  /** 单节重写：指定节重新生成并过门（节清单里有 id 的节才可重写）。 */
+  const rewriteSection = async (sectionId: string) => {
+    setBusy(`section:${sectionId}`)
+    try {
+      const res = await api.sectionRewrite(course, node, sectionId)
+      Message.success(res.message)
+      await refresh()
+    } catch (err) {
+      Message.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const hasContent = !!sections?.length
   const hasQuestions = !!questions?.length
   const active = job && (job.status === 'running' || job.status === 'cancelling')
@@ -182,20 +199,36 @@ export default function LessonView(props: { course: string; node: string; frame:
   else if (!hasQuestions) nextAction = { label: 'AI 出题（6 道混合题型）', onClick: () => void makeQuestions(), loading: busy === 'quiz' }
 
   return (
-    <div style={{ maxWidth: 980, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <Space size={10} align='center' wrap>
-        <Button size='small' type='text' onClick={frame.closeLesson}>← 推荐流</Button>
-        <Title heading={4} style={{ margin: 0 }}>{node}</Title>
-        {stageInfo && <Tag color={stageInfo.color}>{stageInfo.label}</Tag>}
-        <Text type='secondary' style={{ fontSize: 12 }}>掌握度 {(mastery * 100).toFixed(0)}%（题目作答汇总）</Text>
-        <div style={{ marginLeft: 'auto' }}>
-          <Space size={6}>
-            <Button size='small' type='outline' onClick={() => setTutorOpen(true)}>问 AI 老师</Button>
-            <Button size='small' type='outline' onClick={() => { setDiscussIntent(''); setDiscussOpen(true) }}>与 AI 讨论本课</Button>
-            <Button size='small' type='outline' onClick={() => frame.locateInGraph(node)}>在图中查看</Button>
-          </Space>
+    <WidgetBusProvider>
+    <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* 头部两行制：标题行（返回+标题+状态+掌握度）；动作行（主 CTA 左、AI 工具与跳过右） */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <Button size='small' type='text' onClick={frame.closeLesson}>← 返回</Button>
+          <Title heading={4} style={{ margin: 0, fontSize: 20 }}>{node}</Title>
+          {stageInfo && <Tag color={stageInfo.color}>{stageInfo.label}</Tag>}
+          <Tooltip content='掌握度 = 本节点题目作答正确率汇总。点「完成学习」后全部题目进入复习循环：做过的按各自到期复习，没做过的明天开始。'>
+            <Text type='secondary' style={{ fontSize: 13, cursor: 'help' }}>掌握度 {(mastery * 100).toFixed(0)}% ⓘ</Text>
+          </Tooltip>
         </div>
-      </Space>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {nextAction && (
+            <Button type='primary' loading={nextAction.loading} onClick={nextAction.onClick}>
+              {nextAction.label}
+            </Button>
+          )}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+            <Button size='small' type='text' onClick={() => setTutorOpen(true)}>问 AI 老师</Button>
+            <Button size='small' type='text' onClick={() => { setDiscussIntent(''); setDiscussOpen(true) }}>与 AI 讨论</Button>
+            <Button size='small' type='text' onClick={() => frame.locateInGraph(node)}>在图中查看</Button>
+            {!active && (
+              <Button size='small' type='text' status='warning' loading={busy === 'skip'} onClick={() => void toggleSkip()}>
+                {stage === 'skipped' ? '取消跳过' : '跳过'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
 
       <Modal
         title={`与 AI 讨论本课 · ${node}`}
@@ -214,25 +247,32 @@ export default function LessonView(props: { course: string; node: string; frame:
           <Button type='primary' disabled={!discussIntent.trim()} onClick={() => {
             discussInHost(course, node, discussIntent.trim())
             setDiscussOpen(false)
-            Message.info('已在新会话发起讨论（面板已收起，可随时再打开）')
+            Message.info('已在新会话发起讨论（会话窗口已切回前台，学习中心页保持打开）')
           }}>开始讨论</Button>
         </Space>
       </Modal>
 
       <TutorDrawer course={course} node={node} visible={tutorOpen} onClose={() => setTutorOpen(false)} />
 
-      {/* 生成/出题进行中：阶段 + 耗时 + 取消 */}
+      {/* 生成/出题进行中：阶段 + 逐节进度 + 耗时 + 取消 */}
       {active && job && (
         <div style={{
           border: '1px solid var(--color-primary-3,#94bfff)', background: 'var(--color-primary-light-1,#e8f3ff)',
           borderRadius: 8, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12,
         }}>
           <Spin size={20} />
-          <Text>
-            {job.phase === 'quiz' ? '自动出题中' : '正文生成中'}（已 {elapsed}s）——
-            {job.phase === 'quiz' ? '出题完成后即可练习' : '正文落盘后会自动出题，请稍候'}
-          </Text>
-          <Button size='mini' type='text' status='danger' style={{ marginLeft: 'auto' }}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+            <Text>
+              {job.phase === 'quiz' ? '自动出题中' : job.phase === 'outline' ? '生成课程大纲中' : '逐节生成正文中'}（已 {elapsed}s）——
+              {job.phase === 'quiz' ? '出题完成后即可练习' : '完成后自动出题，可先离开稍后回来'}
+            </Text>
+            {job.progress && job.phase === 'sections' && (
+              <Text type='secondary' style={{ fontSize: 12 }}>
+                节进度 {job.progress.done}/{job.progress.total}{job.progress.current ? ` · 正在写「${job.progress.current}」` : ''}
+              </Text>
+            )}
+          </div>
+          <Button size='mini' type='text' status='danger'
             onClick={async () => {
               try {
                 await api.generateCancel(course, node)
@@ -251,22 +291,7 @@ export default function LessonView(props: { course: string; node: string; frame:
         </div>
       )}
 
-      {/* 状态引导：单一主按钮 + 跳过；「完成学习」在练习区下方（做完题再确认） */}
-      <Space size={10} wrap>
-        {nextAction && (
-          <Button type='primary' size='large' loading={nextAction.loading} onClick={nextAction.onClick}>
-            {nextAction.label}
-          </Button>
-        )}
-        {!active && (
-          <Button size='small' type='text' status='warning' loading={busy === 'skip'} onClick={() => void toggleSkip()}>
-            {stage === 'skipped' ? '取消跳过' : '跳过此节点（已有基础）'}
-          </Button>
-        )}
-      </Space>
-
-      {/* 主体：mastery 会话即学习界面——读节 → 做该节题（连对 2 过、至多 5 题）
-          → 下一节；作答即驱动该题 FSRS 调度（新学与到期复习同一会话流） */}
+      {/* 主体：mastery 会话即学习界面——按节推进阅读与练习；manifest 驱动节序列（练习节一等化） */}
       {questions === null ? <Card size='small' style={{ borderRadius: 10 }}><Spin dot /></Card>
         : questions.length === 0
           ? (hasContent && !active && (
@@ -274,29 +299,45 @@ export default function LessonView(props: { course: string; node: string; frame:
           ))
           : (
             <PracticeFlow key={`${course}/${node}`} course={course} node={node}
-              sections={sections ?? []} questions={questions}
+              sections={sections ?? []} manifest={manifest} questions={questions}
               onSettled={() => void refresh({ silent: true })}
               onNeedMore={() => makeQuestions()}
               onPassChange={setSessionPassed} />
           )}
 
-      {/* 整课正文（折叠）：会话内已按节推进阅读；这里留给自由回看与加练出题 */}
+      {/* 整课正文（折叠）：会话内已按节推进阅读；这里留给自由回看与单节重写 */}
       {hasContent && (
         <Card title='整课正文（自由阅读）' size='small' style={{ borderRadius: 10 }}
           extra={!active && (
             <Button size='mini' type='text' loading={busy === 'quiz'} onClick={() => void makeQuestions()}>
-              AI 再出 6 道
+              AI 再出题
             </Button>
           )}>
           <Collapse>
             <Collapse.Item name='full' header='展开完整正文'>
-              <div style={{ fontSize: 15, display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
-                {sections.map((s, i) => (
-                  <div key={i}>
-                    {s.title && <h2 style={{ marginTop: i === 0 ? 0 : 18 }}>{s.title}</h2>}
-                    <MdView md={s.md} />
-                  </div>
-                ))}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
+                {sections.map((s, i) => {
+                  const sid = s.id
+                  return (
+                    <div key={i}>
+                      {s.title && (
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          margin: `${i === 0 ? 0 : 22}px 0 8px`, maxWidth: 680,
+                        }}>
+                          <h2 style={{ fontSize: 19, fontWeight: 600, lineHeight: 1.4, margin: 0 }}>{s.title}</h2>
+                          {sid && !active && (
+                            <Tooltip content='让 AI 重新生成这一节（过质检门后落盘）'>
+                              <Button size='mini' type='text' loading={busy === `section:${sid}`}
+                                onClick={() => void rewriteSection(sid)}>重写</Button>
+                            </Tooltip>
+                          )}
+                        </div>
+                      )}
+                      <MdView md={s.md} />
+                    </div>
+                  )
+                })}
               </div>
             </Collapse.Item>
           </Collapse>
@@ -317,13 +358,7 @@ export default function LessonView(props: { course: string; node: string; frame:
           走完上面会话的全部小节后，这里会出现「完成学习」。
         </Text>
       )}
-
-      {!active && hasContent && (
-        <Text type='secondary' style={{ fontSize: 12 }}>
-          会话按节推进：读完一节点「继续」，连对 2 题过关（每节至多 5 题，卡住可重读/加题）。
-          掌握度由作答正确率汇总；「完成学习」把全部题目纳入复习循环——做过的按各自下次到期复习，没做过的明天开始。
-        </Text>
-      )}
     </div>
+    </WidgetBusProvider>
   )
 }

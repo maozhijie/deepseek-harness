@@ -196,7 +196,7 @@ export class QuestionBank {
 
   /** 校验并写入题库 YAML（LLM 产出过门禁后落盘）。 */
   async save(courseRoot: string, yamlText: string, expectedNode?: string): Promise<{ node: string; count: number; path: string }> {
-    const doc = YAML.parse(yamlText)
+    const doc = YAML.parseModel(yamlText)
     const v = validateBank(doc, expectedNode)
     if (v.errors) throw new Error(`[question-save] schema 校验失败，题库未写入。\n${v.errors.map(e => `  ✗ ${e}`).join('\n')}`)
     const spec = v.spec!

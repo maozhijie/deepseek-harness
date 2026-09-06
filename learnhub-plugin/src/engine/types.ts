@@ -12,6 +12,18 @@ export const STAGES: Stage[] = ['unseen', 'ready', 'learning', 'review', 'master
 /** 内容状态（courses.CONTENT_STATUS）。 */
 export type ContentStatus = 'draft' | 'reviewed' | 'flagged'
 
+/** 节清单条目（frontmatter content.sections；逐节生成管线的进度事实源）。
+ * status=ready 表示该节正文已生成并入正文；version 为该节自身的重写次数。 */
+export interface SectionManifest {
+  id: string
+  title: string
+  type: string
+  status: 'pending' | 'ready'
+  version: number
+  /** 大纲要点（一句话；contextPack 前置骨架注入用，可选）。 */
+  points?: string
+}
+
 /** FSRS 状态块（frontmatter fsrs 字段；日期均为 YYYY-MM-DD 本地日）。 */
 export interface FsrsBlock {
   stability: number
@@ -30,14 +42,25 @@ export interface Fm {
   mastery: number
   /** 练习证据的 EMA（allo 判卷流：首证取分，之后 mastery*0.7+score*0.3）；无证据为 0。 */
   practice_ema?: number
-  content: { version: number; generated_at: string | null; status: ContentStatus }
+  content: {
+    version: number
+    generated_at: string | null
+    status: ContentStatus
+    /** 节清单（可选；逐节生成管线的节点才有。旧节点缺省 = 标题切分回退）。 */
+    sections?: SectionManifest[]
+  }
   practice: { attempts: number; correct: number }
 }
 
 /** 成分技能边（graphstore enc）。 */
 export interface EncEdge { node: string; w: number; note?: string }
 
-/** 图节点（graphstore.Node）。est = 标称学习时长（分钟，XP 内容定价）；type = practice 交互实践节点。 */
+/** Bloom 认知层级（节点可选字段；审计 R11/R12 与未来调度消费）。 */
+export const BLOOM_LEVELS = ['记忆', '理解', '应用', '分析', '评价', '创造'] as const
+export type BloomLevel = (typeof BLOOM_LEVELS)[number]
+
+/** 图节点（graphstore.Node）。est = 标称学习时长（分钟，XP 内容定价）；type = practice 交互实践节点；
+ * bloom/difficulty = 认知维度（可选，渐进采纳；难度跳跃门禁 R11 消费）。 */
 export interface GNode {
   name: string
   pre: string[]
@@ -46,6 +69,8 @@ export interface GNode {
   enc: EncEdge[]
   est?: number
   type?: 'practice'
+  bloom?: BloomLevel
+  difficulty?: 1 | 2 | 3 | 4 | 5
 }
 
 /** 图块（graphstore.Block）。 */
